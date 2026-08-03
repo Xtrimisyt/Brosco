@@ -8,11 +8,16 @@ import android.content.pm.PackageManager
 import android.database.Cursor
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.ContactsContract
+import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.view.animation.LinearInterpolator
 import android.widget.Button
+import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -22,6 +27,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.URLEncoder
 import java.util.Locale
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
@@ -30,7 +36,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var statusText: TextView
     private lateinit var responseText: TextView
     private lateinit var micButton: Button
+    private lateinit var textInput: EditText
+    private lateinit var sendTextButton: Button
+    private lateinit var alwaysListenButton: Button
     private var pulseAnimator: ObjectAnimator? = null
+
+    private var continuousRecognizer: SpeechRecognizer? = null
+    private var alwaysListening = false
+    private var expectingCommand = false // true right after wake word detected
 
     private val SPEECH_REQUEST_CODE = 100
     private val PERMISSIONS_REQUEST_CODE = 200
@@ -42,11 +55,33 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         statusText = findViewById(R.id.statusText)
         responseText = findViewById(R.id.responseText)
         micButton = findViewById(R.id.micButton)
+        textInput = findViewById(R.id.textInput)
+        sendTextButton = findViewById(R.id.sendTextButton)
+        alwaysListenButton = findViewById(R.id.alwaysListenButton)
         tts = TextToSpeech(this, this)
+
+        ensurePermissions()
 
         micButton.setOnClickListener {
             ensurePermissions()
             startListening()
+        }
+
+        sendTextButton.setOnClickListener {
+            val text = textInput.text.toString().trim()
+            if (text.isNotEmpty()) {
+                statusText.text = "\"$text\""
+                handleCommand(text)
+                textInput.setText("")
+            }
+        }
+
+        alwaysListenButton.setOnClickListener {
+            if (alwaysListening) {
+                stopAlwaysListening()
+            } else {
+                startAlwaysListening()
+            }
         }
     }
 
@@ -56,6 +91,78 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    // ---------- ALWAYS-LISTEN MODE (in-app only, requires app open/foreground) ----------
+    private fun startAlwaysListening() {
+        ensurePermissions()
+        alwaysListening = true
+        alwaysListenButton.text = "Stop Always-Listen"
+        statusText.text = "Always listening..."
+        startPulse()
+
+        continuousRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+        continuousRecognizer?.setRecognitionListener(object : RecognitionListener {
+            override fun onResults(results: Bundle?) {
+                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                val heard = matches?.get(0)?.trim()
+                if (!heard.isNullOrEmpty()) {
+                    handleWakeAndCommand(heard)
+                }
+                if (alwaysListening) restartContinuousListening()
+            }
+            override fun onError(error: Int) {
+                if (alwaysListening) restartContinuousListening()
+            }
+            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onPartialResults(partialResults: Bundle?) {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        restartContinuousListening()
+    }
+
+    private fun restartContinuousListening() {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        intent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (alwaysListening) continuousRecognizer?.startListening(intent)
+        }, 300)
+    }
+
+    private fun stopAlwaysListening() {
+        alwaysListening = false
+        alwaysListenButton.text = "Enable Always-Listen"
+        statusText.text = "Brosco"
+        stopPulse()
+        continuousRecognizer?.destroy()
+        continuousRecognizer = null
+    }
+
+    private fun handleWakeAndCommand(heard: String) {
+        val lower = heard.lowercase()
+        if (expectingCommand) {
+            expectingCommand = false
+            statusText.text = "\"$heard\""
+            handleCommand(heard)
+            return
+        }
+        if (lower.contains("brosco")) {
+            val afterWake = lower.substringAfter("brosco").trim()
+            if (afterWake.isNotEmpty()) {
+                statusText.text = "\"$heard\""
+                handleCommand(afterWake)
+            } else {
+                speak("Yes Shrey sir?")
+                expectingCommand = true
+            }
+        }
+        // if no wake word and not expecting a command, ignore (background chatter)
+    }
+
+    // ---------- ONE-SHOT MIC (tap button) ----------
     private fun startPulse() {
         pulseAnimator?.cancel()
         val animator = ObjectAnimator.ofFloat(micButton, "scaleX", 1f, 1.15f, 1f)
@@ -72,9 +179,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun stopPulse() {
-        pulseAnimator?.cancel()
-        micButton.scaleX = 1f
-        micButton.scaleY = 1f
+        if (!alwaysListening) {
+            pulseAnimator?.cancel()
+            micButton.scaleX = 1f
+            micButton.scaleY = 1f
+        }
     }
 
     private fun speak(text: String) {
@@ -126,10 +235,20 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    // ---------- COMMAND ROUTER ----------
     private fun handleCommand(rawText: String) {
         val text = rawText.trim().lowercase()
 
+        // "message John on whatsapp saying running late" / "whatsapp John saying running late"
+        val whatsappRegex = Regex("(?:message|whatsapp)\\s+(.+?)\\s+(?:on whatsapp\\s+)?saying\\s+(.+)")
+        val whatsappMatch = whatsappRegex.find(text)
+
         when {
+            whatsappMatch != null && text.contains("whatsapp") -> {
+                val name = whatsappMatch.groupValues[1].trim()
+                val message = whatsappMatch.groupValues[2].trim()
+                sendWhatsAppMessage(name, message)
+            }
             text.startsWith("call ") -> {
                 val name = text.removePrefix("call ").trim()
                 callContact(name)
@@ -150,6 +269,26 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             else -> {
                 askBrain(rawText)
             }
+        }
+    }
+
+    // ---------- WHATSAPP AUTO-SEND ----------
+    private fun sendWhatsAppMessage(name: String, message: String) {
+        val number = lookupContactNumber(name)
+        if (number == null) {
+            speak("I couldn't find $name in your contacts")
+            return
+        }
+        val cleanNumber = number.replace(Regex("[^0-9+]"), "")
+        WhatsAppAccessibilityService.pendingMessage = message
+        val encodedMsg = URLEncoder.encode(message, "UTF-8")
+        val uri = Uri.parse("https://api.whatsapp.com/send?phone=$cleanNumber&text=$encodedMsg")
+        val intent = Intent(Intent.ACTION_VIEW, uri)
+        try {
+            startActivity(intent)
+            speak("Sending to $name on WhatsApp")
+        } catch (e: Exception) {
+            speak("Couldn't open WhatsApp")
         }
     }
 
@@ -210,7 +349,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         "youtube" to "com.google.android.youtube",
         "gmail" to "com.google.android.gm",
         "instagram" to "com.instagram.android",
-        "camera" to "com.android.camera"
+        "camera" to "com.android.camera",
+        "zomato" to "com.application.zomato"
     )
 
     private fun openApp(name: String) {
@@ -235,8 +375,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 GroqApiClient.ask(query)
             }
             stopPulse()
-            statusText.text = "Brosco"
+            statusText.text = if (alwaysListening) "Always listening..." else "Brosco"
             speak(answer)
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        continuousRecognizer?.destroy()
     }
 }
