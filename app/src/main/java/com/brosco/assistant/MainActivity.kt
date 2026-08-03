@@ -1,6 +1,8 @@
 package com.brosco.assistant
 
 import android.Manifest
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.database.Cursor
@@ -9,6 +11,7 @@ import android.os.Bundle
 import android.provider.ContactsContract
 import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
+import android.view.animation.LinearInterpolator
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -26,6 +29,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var tts: TextToSpeech
     private lateinit var statusText: TextView
     private lateinit var responseText: TextView
+    private lateinit var micButton: Button
+    private var pulseAnimator: ObjectAnimator? = null
 
     private val SPEECH_REQUEST_CODE = 100
     private val PERMISSIONS_REQUEST_CODE = 200
@@ -36,9 +41,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         statusText = findViewById(R.id.statusText)
         responseText = findViewById(R.id.responseText)
+        micButton = findViewById(R.id.micButton)
         tts = TextToSpeech(this, this)
 
-        val micButton = findViewById<Button>(R.id.micButton)
         micButton.setOnClickListener {
             ensurePermissions()
             startListening()
@@ -49,6 +54,27 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (status == TextToSpeech.SUCCESS) {
             tts.language = Locale.US
         }
+    }
+
+    private fun startPulse() {
+        pulseAnimator?.cancel()
+        val animator = ObjectAnimator.ofFloat(micButton, "scaleX", 1f, 1.15f, 1f)
+        val animatorY = ObjectAnimator.ofFloat(micButton, "scaleY", 1f, 1.15f, 1f)
+        animator.duration = 700
+        animatorY.duration = 700
+        animator.repeatCount = ValueAnimator.INFINITE
+        animatorY.repeatCount = ValueAnimator.INFINITE
+        animator.interpolator = LinearInterpolator()
+        animatorY.interpolator = LinearInterpolator()
+        animator.start()
+        animatorY.start()
+        pulseAnimator = animator
+    }
+
+    private fun stopPulse() {
+        pulseAnimator?.cancel()
+        micButton.scaleX = 1f
+        micButton.scaleY = 1f
     }
 
     private fun speak(text: String) {
@@ -73,6 +99,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun startListening() {
+        statusText.text = "Listening..."
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
         intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
         intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak a command...")
@@ -88,9 +115,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == SPEECH_REQUEST_CODE && data != null) {
             val results = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-            val heard = results?.get(0) ?: return
+            val heard = results?.get(0) ?: run {
+                statusText.text = "Brosco"
+                return
+            }
             statusText.text = "\"$heard\""
             handleCommand(heard)
+        } else {
+            statusText.text = "Brosco"
         }
     }
 
@@ -197,10 +229,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private fun askBrain(query: String) {
         speak("Let me think...")
+        startPulse()
         CoroutineScope(Dispatchers.Main).launch {
             val answer = withContext(Dispatchers.IO) {
                 GroqApiClient.ask(query)
             }
+            stopPulse()
+            statusText.text = "Brosco"
             speak(answer)
         }
     }
