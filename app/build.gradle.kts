@@ -14,13 +14,7 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        val localProps = java.util.Properties()
-        val localFile = rootProject.file("local.properties")
-        if (localFile.exists()) {
-            localProps.load(localFile.inputStream())
-        }
-        val apiKey = System.getenv("GROQ_API_KEY")
-            ?: localProps.getProperty("GROQ_API_KEY", "")
+        val apiKey = System.getenv("GROQ_API_KEY") ?: ""
         buildConfigField("String", "GROQ_API_KEY", "\"$apiKey\"")
     }
 
