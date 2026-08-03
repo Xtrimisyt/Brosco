@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Brosco</string>
+    <string name="accessibility_service_description">
+        Brosco can automate supported actions in supported apps.
+    </string>
+</resources>
