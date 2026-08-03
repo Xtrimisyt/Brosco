@@ -14,23 +14,47 @@
         android:text="Brosco"
         android:textSize="28sp"
         android:textColor="#FFFFFF"
-        android:layout_marginBottom="24dp"/>
+        android:layout_marginBottom="16dp"/>
 
     <TextView
         android:id="@+id/responseText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Tap the mic and speak a command."
+        android:text="Tap the mic, type below, or enable always-listen."
         android:textSize="16sp"
         android:textColor="#B0B0B0"
         android:gravity="center"
-        android:layout_marginBottom="40dp"/>
+        android:layout_marginBottom="24dp"/>
 
     <Button
         android:id="@+id/micButton"
         android:layout_width="120dp"
         android:layout_height="120dp"
         android:text="🎤"
-        android:textSize="36sp"/>
+        android:textSize="36sp"
+        android:layout_marginBottom="20dp"/>
+
+    <EditText
+        android:id="@+id/textInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Type a command instead..."
+        android:textColorHint="#777777"
+        android:textColor="#FFFFFF"
+        android:padding="12dp"
+        android:layout_marginBottom="12dp"/>
+
+    <Button
+        android:id="@+id/sendTextButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Send"
+        android:layout_marginBottom="20dp"/>
+
+    <Button
+        android:id="@+id/alwaysListenButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Enable Always-Listen"/>
 
 </LinearLayout>
