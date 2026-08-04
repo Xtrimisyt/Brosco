@@ -20,7 +20,7 @@
         android:id="@+id/responseText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Tap the mic, type below, or enable always-listen."
+        android:text="Tap the mic, type below, or enable listening."
         android:textSize="16sp"
         android:textColor="#B0B0B0"
         android:gravity="center"
@@ -55,6 +55,13 @@
         android:id="@+id/alwaysListenButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Enable Always-Listen"/>
+        android:text="Enable Always-Listen (app open)"
+        android:layout_marginBottom="12dp"/>
+
+    <Button
+        android:id="@+id/backgroundServiceButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Start Background Brosco"/>
 
 </LinearLayout>
