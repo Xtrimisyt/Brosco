@@ -373,11 +373,23 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val uri = Uri.parse("https://www.zomato.com/search?q=$encodedQuery")
         val intent = Intent(Intent.ACTION_VIEW, uri)
+
+        val zomatoInstalled = packageManager.getLaunchIntentForPackage("com.application.zomato") != null
+        if (zomatoInstalled) {
+            intent.setPackage("com.application.zomato")
+        }
+
         try {
             startActivity(intent)
             speak("Here's what I found for $query on Zomato")
         } catch (e: Exception) {
-            speak("Couldn't open Zomato")
+            val launchIntent = packageManager.getLaunchIntentForPackage("com.application.zomato")
+            if (launchIntent != null) {
+                startActivity(launchIntent)
+                speak("Opening Zomato - search for $query yourself, the direct link didn't work")
+            } else {
+                speak("Couldn't open Zomato")
+            }
         }
     }
 
