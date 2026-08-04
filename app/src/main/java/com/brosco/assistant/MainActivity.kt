@@ -43,7 +43,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private var continuousRecognizer: SpeechRecognizer? = null
     private var alwaysListening = false
-    private var expectingCommand = false // true right after wake word detected
+    private var expectingCommand = false
 
     private val SPEECH_REQUEST_CODE = 100
     private val PERMISSIONS_REQUEST_CODE = 200
@@ -91,7 +91,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // ---------- ALWAYS-LISTEN MODE (in-app only, requires app open/foreground) ----------
     private fun startAlwaysListening() {
         ensurePermissions()
         alwaysListening = true
@@ -159,10 +158,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 expectingCommand = true
             }
         }
-        // if no wake word and not expecting a command, ignore (background chatter)
     }
 
-    // ---------- ONE-SHOT MIC (tap button) ----------
     private fun startPulse() {
         pulseAnimator?.cancel()
         val animator = ObjectAnimator.ofFloat(micButton, "scaleX", 1f, 1.15f, 1f)
@@ -235,11 +232,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // ---------- COMMAND ROUTER ----------
     private fun handleCommand(rawText: String) {
         val text = rawText.trim().lowercase()
 
-        // "message John on whatsapp saying running late" / "whatsapp John saying running late"
         val whatsappRegex = Regex("(?:message|whatsapp)\\s+(.+?)\\s+(?:on whatsapp\\s+)?saying\\s+(.+)")
         val whatsappMatch = whatsappRegex.find(text)
 
@@ -262,6 +257,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     speak("Say it like: text John saying I'm on my way")
                 }
             }
+            text.startsWith("order ") -> {
+                val food = text.removePrefix("order ").trim().replace(" from ", " ")
+                openZomatoSearch(food)
+            }
+            text.startsWith("find ") && (text.contains("restaurant") || text.contains("food")) -> {
+                val query = text.removePrefix("find ").trim()
+                openZomatoSearch(query)
+            }
             text.startsWith("open ") -> {
                 val appName = text.removePrefix("open ").trim()
                 openApp(appName)
@@ -272,7 +275,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // ---------- WHATSAPP AUTO-SEND ----------
     private fun sendWhatsAppMessage(name: String, message: String) {
         val number = lookupContactNumber(name)
         if (number == null) {
@@ -364,6 +366,18 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             speak("Opening $name")
         } else {
             speak("$name isn't installed")
+        }
+    }
+
+    private fun openZomatoSearch(query: String) {
+        val encodedQuery = URLEncoder.encode(query, "UTF-8")
+        val uri = Uri.parse("https://www.zomato.com/search?q=$encodedQuery")
+        val intent = Intent(Intent.ACTION_VIEW, uri)
+        try {
+            startActivity(intent)
+            speak("Here's what I found for $query on Zomato")
+        } catch (e: Exception) {
+            speak("Couldn't open Zomato")
         }
     }
 
