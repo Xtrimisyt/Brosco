@@ -5,12 +5,9 @@ import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.database.Cursor
-import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.provider.ContactsContract
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -25,9 +22,6 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.net.URLEncoder
 import java.util.Locale
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
@@ -39,6 +33,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var textInput: EditText
     private lateinit var sendTextButton: Button
     private lateinit var alwaysListenButton: Button
+    private lateinit var backgroundServiceButton: Button
     private var pulseAnimator: ObjectAnimator? = null
 
     private var continuousRecognizer: SpeechRecognizer? = null
@@ -58,9 +53,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         textInput = findViewById(R.id.textInput)
         sendTextButton = findViewById(R.id.sendTextButton)
         alwaysListenButton = findViewById(R.id.alwaysListenButton)
+        backgroundServiceButton = findViewById(R.id.backgroundServiceButton)
         tts = TextToSpeech(this, this)
 
         ensurePermissions()
+        updateBackgroundButtonLabel()
 
         micButton.setOnClickListener {
             ensurePermissions()
@@ -71,18 +68,35 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val text = textInput.text.toString().trim()
             if (text.isNotEmpty()) {
                 statusText.text = "\"$text\""
-                handleCommand(text)
+                runCommand(text)
                 textInput.setText("")
             }
         }
 
         alwaysListenButton.setOnClickListener {
-            if (alwaysListening) {
-                stopAlwaysListening()
-            } else {
-                startAlwaysListening()
-            }
+            if (alwaysListening) stopAlwaysListening() else startAlwaysListening()
         }
+
+        backgroundServiceButton.setOnClickListener {
+            if (BrocoBackgroundService.isRunning) {
+                stopService(Intent(this, BrocoBackgroundService::class.java))
+            } else {
+                ensurePermissions()
+                val intent = Intent(this, BrocoBackgroundService::class.java)
+                ContextCompat.startForegroundService(this, intent)
+            }
+            Handler(Looper.getMainLooper()).postDelayed({ updateBackgroundButtonLabel() }, 500)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateBackgroundButtonLabel()
+    }
+
+    private fun updateBackgroundButtonLabel() {
+        backgroundServiceButton.text = if (BrocoBackgroundService.isRunning)
+            "Stop Background Brosco" else "Start Background Brosco"
     }
 
     override fun onInit(status: Int) {
@@ -91,10 +105,20 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    private fun runCommand(text: String) {
+        CommandProcessor.process(this, text, CoroutineScope(Dispatchers.Main)) { response ->
+            runOnUiThread {
+                stopPulse()
+                statusText.text = if (alwaysListening) "Always listening..." else "Brosco"
+                speak(response)
+            }
+        }
+    }
+
     private fun startAlwaysListening() {
         ensurePermissions()
         alwaysListening = true
-        alwaysListenButton.text = "Stop Always-Listen"
+        alwaysListenButton.text = "Stop Always-Listen (app open)"
         statusText.text = "Always listening..."
         startPulse()
 
@@ -103,9 +127,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             override fun onResults(results: Bundle?) {
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 val heard = matches?.get(0)?.trim()
-                if (!heard.isNullOrEmpty()) {
-                    handleWakeAndCommand(heard)
-                }
+                if (!heard.isNullOrEmpty()) handleWakeAndCommand(heard)
                 if (alwaysListening) restartContinuousListening()
             }
             override fun onError(error: Int) {
@@ -133,7 +155,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private fun stopAlwaysListening() {
         alwaysListening = false
-        alwaysListenButton.text = "Enable Always-Listen"
+        alwaysListenButton.text = "Enable Always-Listen (app open)"
         statusText.text = "Brosco"
         stopPulse()
         continuousRecognizer?.destroy()
@@ -145,14 +167,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (expectingCommand) {
             expectingCommand = false
             statusText.text = "\"$heard\""
-            handleCommand(heard)
+            runCommand(heard)
             return
         }
         if (lower.contains("brosco")) {
             val afterWake = lower.substringAfter("brosco").trim()
             if (afterWake.isNotEmpty()) {
                 statusText.text = "\"$heard\""
-                handleCommand(afterWake)
+                runCommand(afterWake)
             } else {
                 speak("Yes Shrey sir?")
                 expectingCommand = true
@@ -184,10 +206,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun speak(text: String) {
-        runOnUiThread {
-            responseText.text = text
-            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
-        }
+        responseText.text = text
+        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
     }
 
     private fun ensurePermissions() {
@@ -198,7 +218,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             Manifest.permission.SEND_SMS
         ).filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }.toMutableList()
+
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                needed.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
         }
+
         if (needed.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, needed.toTypedArray(), PERMISSIONS_REQUEST_CODE)
         }
@@ -226,183 +253,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 return
             }
             statusText.text = "\"$heard\""
-            handleCommand(heard)
+            startPulse()
+            runCommand(heard)
         } else {
             statusText.text = "Brosco"
-        }
-    }
-
-    private fun handleCommand(rawText: String) {
-        val text = rawText.trim().lowercase()
-
-        val whatsappRegex = Regex("(?:message|whatsapp)\\s+(.+?)\\s+(?:on whatsapp\\s+)?saying\\s+(.+)")
-        val whatsappMatch = whatsappRegex.find(text)
-
-        when {
-            whatsappMatch != null && text.contains("whatsapp") -> {
-                val name = whatsappMatch.groupValues[1].trim()
-                val message = whatsappMatch.groupValues[2].trim()
-                sendWhatsAppMessage(name, message)
-            }
-            text.startsWith("call ") -> {
-                val name = text.removePrefix("call ").trim()
-                callContact(name)
-            }
-            text.startsWith("text ") || text.startsWith("message ") -> {
-                val body = text.substringAfter(" ").trim()
-                val parts = body.split(" saying ", limit = 2)
-                if (parts.size == 2) {
-                    smsContact(parts[0].trim(), parts[1].trim())
-                } else {
-                    speak("Say it like: text John saying I'm on my way")
-                }
-            }
-            text.startsWith("order ") -> {
-                val food = text.removePrefix("order ").trim().replace(" from ", " ")
-                openZomatoSearch(food)
-            }
-            text.startsWith("find ") && (text.contains("restaurant") || text.contains("food")) -> {
-                val query = text.removePrefix("find ").trim()
-                openZomatoSearch(query)
-            }
-            text.startsWith("open ") -> {
-                val appName = text.removePrefix("open ").trim()
-                openApp(appName)
-            }
-            else -> {
-                askBrain(rawText)
-            }
-        }
-    }
-
-    private fun sendWhatsAppMessage(name: String, message: String) {
-        val number = lookupContactNumber(name)
-        if (number == null) {
-            speak("I couldn't find $name in your contacts")
-            return
-        }
-        val cleanNumber = number.replace(Regex("[^0-9+]"), "")
-        WhatsAppAccessibilityService.pendingMessage = message
-        val encodedMsg = URLEncoder.encode(message, "UTF-8")
-        val uri = Uri.parse("https://api.whatsapp.com/send?phone=$cleanNumber&text=$encodedMsg")
-        val intent = Intent(Intent.ACTION_VIEW, uri)
-        try {
-            startActivity(intent)
-            speak("Sending to $name on WhatsApp")
-        } catch (e: Exception) {
-            speak("Couldn't open WhatsApp")
-        }
-    }
-
-    private fun callContact(name: String) {
-        val number = lookupContactNumber(name)
-        if (number == null) {
-            speak("I couldn't find $name in your contacts")
-            return
-        }
-        val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$number"))
-        try {
-            startActivity(intent)
-            speak("Calling $name")
-        } catch (e: SecurityException) {
-            speak("I need call permission to do that")
-        }
-    }
-
-    private fun smsContact(name: String, body: String) {
-        val number = lookupContactNumber(name)
-        if (number == null) {
-            speak("I couldn't find $name in your contacts")
-            return
-        }
-        try {
-            val smsManager = android.telephony.SmsManager.getDefault()
-            smsManager.sendTextMessage(number, null, body, null, null)
-            speak("Sent to $name")
-        } catch (e: Exception) {
-            speak("Couldn't send that text")
-        }
-    }
-
-    private fun lookupContactNumber(name: String): String? {
-        val cursor: Cursor? = contentResolver.query(
-            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-            arrayOf(
-                ContactsContract.CommonDataKinds.Phone.NUMBER,
-                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
-            ),
-            "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
-            arrayOf("%$name%"),
-            null
-        )
-        cursor?.use {
-            if (it.moveToFirst()) {
-                val numberIndex = it.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
-                return it.getString(numberIndex)
-            }
-        }
-        return null
-    }
-
-    private val appPackages = mapOf(
-        "whatsapp" to "com.whatsapp",
-        "spotify" to "com.spotify.music",
-        "maps" to "com.google.android.apps.maps",
-        "youtube" to "com.google.android.youtube",
-        "gmail" to "com.google.android.gm",
-        "instagram" to "com.instagram.android",
-        "camera" to "com.android.camera",
-        "zomato" to "com.application.zomato"
-    )
-
-    private fun openApp(name: String) {
-        val pkg = appPackages[name] ?: run {
-            speak("I don't have $name mapped yet")
-            return
-        }
-        val launchIntent = packageManager.getLaunchIntentForPackage(pkg)
-        if (launchIntent != null) {
-            startActivity(launchIntent)
-            speak("Opening $name")
-        } else {
-            speak("$name isn't installed")
-        }
-    }
-
-    private fun openZomatoSearch(query: String) {
-        val encodedQuery = URLEncoder.encode(query, "UTF-8")
-        val uri = Uri.parse("https://www.zomato.com/search?q=$encodedQuery")
-        val intent = Intent(Intent.ACTION_VIEW, uri)
-
-        val zomatoInstalled = packageManager.getLaunchIntentForPackage("com.application.zomato") != null
-        if (zomatoInstalled) {
-            intent.setPackage("com.application.zomato")
-        }
-
-        try {
-            startActivity(intent)
-            speak("Here's what I found for $query on Zomato")
-        } catch (e: Exception) {
-            val launchIntent = packageManager.getLaunchIntentForPackage("com.application.zomato")
-            if (launchIntent != null) {
-                startActivity(launchIntent)
-                speak("Opening Zomato - search for $query yourself, the direct link didn't work")
-            } else {
-                speak("Couldn't open Zomato")
-            }
-        }
-    }
-
-    private fun askBrain(query: String) {
-        speak("Let me think...")
-        startPulse()
-        CoroutineScope(Dispatchers.Main).launch {
-            val answer = withContext(Dispatchers.IO) {
-                GroqApiClient.ask(query)
-            }
-            stopPulse()
-            statusText.text = if (alwaysListening) "Always listening..." else "Brosco"
-            speak(answer)
         }
     }
 
