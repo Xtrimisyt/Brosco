@@ -8,6 +8,13 @@ enum class IntentType {
     SEARCH,
     ORDER_FOOD,
     PLAY_MUSIC,
+
+    GO_BACK,
+    GO_HOME,
+    SCROLL_DOWN,
+    SCROLL_UP,
+    CLICK,
+
     UNKNOWN
 }
 
@@ -72,13 +79,11 @@ object IntentDetector {
         }
 
         // FOOD
-
         if (input.contains("zomato") ||
             input.contains("dominos") ||
             input.contains("domino's") ||
             input.startsWith("order ")
         ) {
-
             return DetectedIntent(
                 IntentType.ORDER_FOOD,
                 input
@@ -86,13 +91,52 @@ object IntentDetector {
         }
 
         // MUSIC
-
         if (input.startsWith("play ")) {
-
             return DetectedIntent(
                 IntentType.PLAY_MUSIC,
                 input.removePrefix("play ").trim()
             )
+        }
+
+        // BACK
+        if (
+            input == "go back" ||
+            input == "back" ||
+            input.contains("go back") ||
+            input.contains("back please")
+        ) {
+            return DetectedIntent(IntentType.GO_BACK)
+        }
+
+        // HOME
+        if (
+            input == "go home" ||
+            input == "home" ||
+            input.contains("go home")
+        ) {
+            return DetectedIntent(IntentType.GO_HOME)
+        }
+
+        // SCROLL DOWN
+        if (input.contains("scroll down")) {
+            return DetectedIntent(IntentType.SCROLL_DOWN)
+        }
+
+        // SCROLL UP
+        if (input.contains("scroll up")) {
+            return DetectedIntent(IntentType.SCROLL_UP)
+        }
+
+        // CLICK
+        val clickWords = listOf("click", "tap", "press")
+
+        clickWords.forEach { word ->
+            if (input.startsWith("$word ")) {
+                return DetectedIntent(
+                    IntentType.CLICK,
+                    input.removePrefix("$word ").trim()
+                )
+            }
         }
 
         return DetectedIntent(IntentType.UNKNOWN)
