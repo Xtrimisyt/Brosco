@@ -14,29 +14,28 @@ import java.net.URLEncoder
 object CommandProcessor {
 
     private val appPackages = mapOf(
-    "whatsapp" to "com.whatsapp",
-    "spotify" to "com.spotify.music",
-    "youtube" to "com.google.android.youtube",
-    "instagram" to "com.instagram.android",
-    "gmail" to "com.google.android.gm",
-    "maps" to "com.google.android.apps.maps",
-    "google maps" to "com.google.android.apps.maps",
-    "camera" to "com.android.camera",
-    "chrome" to "com.android.chrome",
-    "google" to "com.google.android.googlequicksearchbox",
-    "play store" to "com.android.vending",
-    "calculator" to "com.google.android.calculator",
-    "clock" to "com.google.android.deskclock",
-    "photos" to "com.google.android.apps.photos",
-    "gallery" to "com.google.android.apps.photos",
-    "settings" to "com.android.settings",
-    "telegram" to "org.telegram.messenger",
-    "prime video" to "com.amazon.avod.thirdpartyclient",
-    "zomato" to "com.application.zomato",
-    "dominos" to "pizzaonline.dominos",
-    "domino's" to "pizzaonline.dominos"
-)
-
+        "whatsapp" to "com.whatsapp",
+        "spotify" to "com.spotify.music",
+        "youtube" to "com.google.android.youtube",
+        "instagram" to "com.instagram.android",
+        "gmail" to "com.google.android.gm",
+        "maps" to "com.google.android.apps.maps",
+        "google maps" to "com.google.android.apps.maps",
+        "camera" to "com.android.camera",
+        "chrome" to "com.android.chrome",
+        "google" to "com.google.android.googlequicksearchbox",
+        "play store" to "com.android.vending",
+        "calculator" to "com.google.android.calculator",
+        "clock" to "com.google.android.deskclock",
+        "photos" to "com.google.android.apps.photos",
+        "gallery" to "com.google.android.apps.photos",
+        "settings" to "com.android.settings",
+        "telegram" to "org.telegram.messenger",
+        "prime video" to "com.amazon.avod.thirdpartyclient",
+        "zomato" to "com.application.zomato",
+        "dominos" to "pizzaonline.dominos",
+        "domino's" to "pizzaonline.dominos"
+    )
 
     fun process(context: Context, rawText: String, scope: CoroutineScope, speak: (String) -> Unit) {
         val text = rawText.trim().lowercase()
@@ -55,6 +54,30 @@ object CommandProcessor {
             }
             detectedIntent.type == IntentType.ORDER_FOOD -> {
                 openZomatoSearch(context, detectedIntent.target, speak)
+            }
+            detectedIntent.type == IntentType.GO_BACK -> {
+                WhatsAppAccessibilityService.pendingBack = true
+                speak("Going back.")
+            }
+            detectedIntent.type == IntentType.GO_HOME -> {
+                WhatsAppAccessibilityService.pendingHome = true
+                speak("Going home.")
+            }
+            detectedIntent.type == IntentType.SCROLL_DOWN -> {
+                WhatsAppAccessibilityService.pendingScrollForward = true
+                speak("Scrolling down.")
+            }
+            detectedIntent.type == IntentType.SCROLL_UP -> {
+                WhatsAppAccessibilityService.pendingScrollBackward = true
+                speak("Scrolling up.")
+            }
+            detectedIntent.type == IntentType.CLICK -> {
+                if (detectedIntent.target.isNotBlank()) {
+                    WhatsAppAccessibilityService.pendingClickText = detectedIntent.target
+                    speak("Clicking ${detectedIntent.target}.")
+                } else {
+                    speak("What should I click?")
+                }
             }
 
             // Legacy fallback checks
