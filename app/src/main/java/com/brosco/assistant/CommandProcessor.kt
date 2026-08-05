@@ -166,22 +166,25 @@ object CommandProcessor {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
         val zomatoInstalled = context.packageManager.getLaunchIntentForPackage("com.application.zomato") != null
+
         if (zomatoInstalled) {
             intent.setPackage("com.application.zomato")
-        }
-
-        try {
-            context.startActivity(intent)
-            speak("Here's what I found for $query on Zomato")
-        } catch (e: Exception) {
+            try {
+                context.startActivity(intent)
+                speak("Here's what I found for $query on Zomato")
+                return
+            } catch (e: Exception) {
+                // Zomato couldn't handle this exact URL - fall through to plain app launch below
+            }
             val launchIntent = context.packageManager.getLaunchIntentForPackage("com.application.zomato")
+            launchIntent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             if (launchIntent != null) {
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 context.startActivity(launchIntent)
                 speak("Opening Zomato - search for $query yourself, the direct link didn't work")
             } else {
                 speak("Couldn't open Zomato")
             }
+        } else {
+            speak("Zomato isn't installed")
         }
     }
-}
