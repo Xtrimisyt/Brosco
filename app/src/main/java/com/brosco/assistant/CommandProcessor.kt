@@ -188,3 +188,4 @@ object CommandProcessor {
             speak("Zomato isn't installed")
         }
     }
+}
