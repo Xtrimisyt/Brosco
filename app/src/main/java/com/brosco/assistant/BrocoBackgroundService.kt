@@ -45,6 +45,11 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
         "At your service."
     )
 
+    // The on-device recognizer often mishears "Brosco" as one of these -
+    // matching all of them fixes "I have to say it twice" without touching
+    // the recognizer itself.
+    private val wakeVariants = listOf("brosco", "brasco", "bosco", "brusco", "broscoe", "rosco")
+
     override fun onCreate() {
         super.onCreate()
 
@@ -130,7 +135,7 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
         // same instance is reused for too many cycles in a row, especially with
         // no foreground Activity. Periodically tear it down and build a fresh one.
         val needsRecreate = consecutiveErrors >= 3 || cyclesSinceRecreate >= 20
-        val delayMs = if (consecutiveErrors >= 3) 2000L else 500L
+        val delayMs = if (consecutiveErrors >= 3) 2000L else 300L
 
         mainHandler.postDelayed({
 
@@ -179,9 +184,11 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
             return
         }
 
-        if (lower.contains("brosco")) {
+        val matchedWake = wakeVariants.firstOrNull { lower.contains(it) }
 
-            val afterWake = lower.substringAfter("brosco").trim()
+        if (matchedWake != null) {
+
+            val afterWake = lower.substringAfter(matchedWake).trim()
 
             if (afterWake.isNotEmpty()) {
 
