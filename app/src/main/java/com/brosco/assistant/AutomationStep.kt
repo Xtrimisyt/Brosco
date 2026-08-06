@@ -22,6 +22,12 @@ sealed class AutomationStep {
     /** Long-press the first node whose text/content-description contains this string. */
     data class LongPressText(val text: String) : AutomationStep()
 
+    /** WhatsApp's send button has no reliable text, only a content-description/id - special-cased. */
+    object ClickWhatsAppSend : AutomationStep()
+
+    /** Find a label on screen (e.g. a dish name) and tap the nearest "Add" affordance next to it. */
+    data class AddItemNear(val label: String) : AutomationStep()
+
     /** Swipe across the screen in a direction. */
     data class Swipe(val direction: SwipeDirection) : AutomationStep()
 
