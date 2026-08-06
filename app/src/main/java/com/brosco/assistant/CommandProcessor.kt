@@ -33,8 +33,8 @@ object CommandProcessor {
         "telegram" to "org.telegram.messenger",
         "prime video" to "com.amazon.avod.thirdpartyclient",
         "zomato" to "com.application.zomato",
-        "dominos" to "pizzaonline.dominos",
-        "domino's" to "pizzaonline.dominos"
+        "dominos" to "com.Dominos",
+        "domino's" to "com.Dominos"
     )
 
     fun process(context: Context, rawText: String, scope: CoroutineScope, speak: (String) -> Unit) {
