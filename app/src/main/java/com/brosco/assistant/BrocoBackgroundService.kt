@@ -38,6 +38,13 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    private val wakeGreetings = listOf(
+        "Yes, Shrey?",
+        "Go ahead, Shrey.",
+        "I'm listening.",
+        "At your service."
+    )
+
     override fun onCreate() {
         super.onCreate()
 
@@ -182,7 +189,7 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
 
             } else {
 
-                speak("Yes Shrey.")
+                speak(wakeGreetings.random())
 
                 expectingCommand = true
 
@@ -276,4 +283,3 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
         tts = null
     }
 }
-    
