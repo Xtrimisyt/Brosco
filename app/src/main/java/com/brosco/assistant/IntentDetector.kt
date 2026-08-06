@@ -1,4 +1,4 @@
-        package com.brosco.assistant
+package com.brosco.assistant
 
 enum class IntentType {
     OPEN_APP,
@@ -22,6 +22,7 @@ enum class IntentType {
     // App-automation flows (Section 3)
     ZOMATO_ORDER,
     DOMINOS_ORDER,
+    ADD_ITEM,
     YOUTUBE_SEARCH,
     YOUTUBE_PAUSE,
     YOUTUBE_NEXT,
@@ -65,6 +66,12 @@ object IntentDetector {
 
         // ---- Section 3: named app-automation flows ----
         detectAppFlow(input)?.let { return it }
+
+        // ADD ITEM ("add margherita pizza", "add 2 medium fries") - clicks the
+        // nearest "Add" button next to a matching label on screen.
+        if (input.startsWith("add ")) {
+            return DetectedIntent(IntentType.ADD_ITEM, input.removePrefix("add ").trim())
+        }
 
         // OPEN APP
         val openWords = listOf("open", "launch", "start")
