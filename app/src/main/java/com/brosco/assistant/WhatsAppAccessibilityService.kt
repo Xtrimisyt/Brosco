@@ -357,7 +357,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         if (node == null || depth > 40 || visitBudget <= 0) return null
         visitBudget--
 
-        val editableByAction = node.actionList?.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT.id } == true
+        val editableByAction = node.actionList?.contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_TEXT) == true
         if (node.isEditable || editableByAction || node.className?.toString()?.contains("EditText") == true) {
             return node
         }
@@ -372,14 +372,14 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     // Long press
     // ------------------------------------------------------------------
     private fun longPressByText(root: AccessibilityNodeInfo, text: String): Boolean {
-        visitBudget = maxVisits
-        val node = findNodeByText(root, text, exact = false, depth = 0) ?: return false
+    val node = findNodeByText(root, text, exact = false, depth = 0) ?: return false
 
-        if (node.actionList?.any { it.id == AccessibilityNodeInfo.ACTION_LONG_CLICK.id } == true) {
-            return node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
-        }
-        return longPressNodeCenter(node)
+    return if (node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
+        true
+    } else {
+        longPressNodeCenter(node)
     }
+}
 
     private fun longPressNodeCenter(node: AccessibilityNodeInfo): Boolean {
         val bounds = Rect()
