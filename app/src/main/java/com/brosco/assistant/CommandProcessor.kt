@@ -1,4 +1,4 @@
-package com.brosco.assistant
+          package com.brosco.assistant
 
 import android.content.Context
 import android.content.Intent
@@ -7,6 +7,7 @@ import android.net.Uri
 import android.provider.ContactsContract
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.URLEncoder
@@ -45,7 +46,72 @@ object CommandProcessor {
         val whatsappMatch = whatsappRegex.find(text)
 
         when {
-            // New IntentDetector checks
+            // Section 5: chained commands - "open zomato then search burger then add to cart"
+            detectedIntent.type == IntentType.MULTI_STEP -> {
+                runChain(context, detectedIntent.target, scope, speak)
+            }
+
+            // Section 3: app-automation flows
+            detectedIntent.type == IntentType.ZOMATO_ORDER -> {
+                runZomatoFlow(context, detectedIntent.target, speak)
+            }
+            detectedIntent.type == IntentType.DOMINOS_ORDER -> {
+                runDominosFlow(context, detectedIntent.target, speak)
+            }
+            detectedIntent.type == IntentType.YOUTUBE_SEARCH -> {
+                runYoutubeSearchFlow(context, detectedIntent.target, speak)
+            }
+            detectedIntent.type == IntentType.YOUTUBE_PAUSE -> {
+                WhatsAppAccessibilityService.pendingClickText = "pause video"
+                speak("Pausing.")
+            }
+            detectedIntent.type == IntentType.YOUTUBE_NEXT -> {
+                WhatsAppAccessibilityService.pendingClickText = "next video"
+                speak("Next video.")
+            }
+            detectedIntent.type == IntentType.SPOTIFY_SEARCH -> {
+                runSpotifySearchFlow(context, detectedIntent.target, speak)
+            }
+            detectedIntent.type == IntentType.SPOTIFY_PAUSE -> {
+                WhatsAppAccessibilityService.pendingClickText = "pause"
+                speak("Pausing the music.")
+            }
+            detectedIntent.type == IntentType.SPOTIFY_NEXT -> {
+                WhatsAppAccessibilityService.pendingClickText = "skip to next"
+                speak("Skipping.")
+            }
+            detectedIntent.type == IntentType.INSTAGRAM_SCROLL_FEED -> {
+                openApp(context, "instagram", speak)
+                WhatsAppAccessibilityService.runTask(
+                    listOf(
+                        AutomationStep.Wait(1200),
+                        AutomationStep.Swipe(SwipeDirection.UP)
+                    ),
+                    onUpdate = {}
+                )
+                speak("Scrolling your feed.")
+            }
+            detectedIntent.type == IntentType.INSTAGRAM_OPEN_REELS -> {
+                openApp(context, "instagram", speak)
+                WhatsAppAccessibilityService.runTask(
+                    listOf(
+                        AutomationStep.Wait(1200),
+                        AutomationStep.ClickText("Reels")
+                    ),
+                    onUpdate = { speak(it) }
+                )
+                speak("Opening reels.")
+            }
+            detectedIntent.type == IntentType.INSTAGRAM_LIKE -> {
+                WhatsAppAccessibilityService.pendingClickId = "com.instagram.android:id/row_feed_button_like"
+                speak("Liking that.")
+            }
+            detectedIntent.type == IntentType.INSTAGRAM_FOLLOW -> {
+                WhatsAppAccessibilityService.pendingClickText = "follow"
+                speak("Following.")
+            }
+
+            // Section 2: universal gestures / single actions
             detectedIntent.type == IntentType.OPEN_APP -> {
                 openApp(context, detectedIntent.target, speak)
             }
@@ -70,6 +136,39 @@ object CommandProcessor {
             detectedIntent.type == IntentType.SCROLL_UP -> {
                 WhatsAppAccessibilityService.pendingScrollBackward = true
                 speak("Scrolling up.")
+            }
+            detectedIntent.type == IntentType.TYPE_TEXT -> {
+                if (detectedIntent.target.isNotBlank()) {
+                    WhatsAppAccessibilityService.pendingTypeText = detectedIntent.target
+                    speak("Typing ${detectedIntent.target}.")
+                } else {
+                    speak("What should I type?")
+                }
+            }
+            detectedIntent.type == IntentType.LONG_PRESS -> {
+                if (detectedIntent.target.isNotBlank()) {
+                    WhatsAppAccessibilityService.pendingLongPressText = detectedIntent.target
+                    speak("Holding ${detectedIntent.target}.")
+                } else {
+                    speak("What should I long-press?")
+                }
+            }
+            detectedIntent.type == IntentType.SWIPE -> {
+                val direction = parseSwipeDirection(detectedIntent.target)
+                if (direction != null) {
+                    WhatsAppAccessibilityService.pendingSwipe = direction
+                    speak("Swiping ${detectedIntent.target}.")
+                } else {
+                    speak("Swipe which way - up, down, left or right?")
+                }
+            }
+            detectedIntent.type == IntentType.CLICK_ID -> {
+                if (detectedIntent.target.isNotBlank()) {
+                    WhatsAppAccessibilityService.pendingClickId = detectedIntent.target
+                    speak("Clicking that element.")
+                } else {
+                    speak("Which view id?")
+                }
             }
             detectedIntent.type == IntentType.CLICK -> {
                 if (detectedIntent.target.isNotBlank()) {
@@ -120,6 +219,144 @@ object CommandProcessor {
                     speak(answer)
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Section 5: Planning - chained multi-step voice commands
+    // ------------------------------------------------------------------
+    private fun runChain(context: Context, chained: String, scope: CoroutineScope, speak: (String) -> Unit) {
+        val pieces = chained
+            .split(Regex(" then | and then | -> | after that | followed by "))
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+
+        if (pieces.isEmpty()) {
+            speak("I didn't catch the steps in that.")
+            return
+        }
+
+        speak("On it - ${pieces.size} steps.")
+
+        scope.launch {
+            for ((index, piece) in pieces.withIndex()) {
+                process(context, piece, this, speak)
+                // Give each step's screen time to settle before firing the next
+                // voice command on top of it (Section 5: execute one after another).
+                if (index < pieces.lastIndex) delay(2500)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Section 3: Zomato - search food -> select restaurant -> add to cart -> open cart
+    // ------------------------------------------------------------------
+    private fun runZomatoFlow(context: Context, food: String, speak: (String) -> Unit) {
+        val query = food.ifBlank { "food" }
+        openApp(context, "zomato", speak)
+        WhatsAppAccessibilityService.runTask(
+            steps = listOf(
+                AutomationStep.Wait(1800),
+                AutomationStep.ClickText("Search"),
+                AutomationStep.Wait(500),
+                AutomationStep.TypeText(query),
+                AutomationStep.Wait(1800),
+                AutomationStep.ClickText(query, exactMatch = false),
+                AutomationStep.Wait(1800),
+                AutomationStep.ClickText("Add"),
+                AutomationStep.Wait(800),
+                AutomationStep.ClickText("View Cart")
+            ),
+            onUpdate = { speak(it) },
+            onDone = { speak("Your cart should be open - take a look and confirm the order.") }
+        )
+        speak("Searching for $query on Zomato.")
+    }
+
+    // ------------------------------------------------------------------
+    // Section 3: Domino's - search pizza -> choose size -> add to cart -> open cart
+    // ------------------------------------------------------------------
+    private fun runDominosFlow(context: Context, pizza: String, speak: (String) -> Unit) {
+        val query = pizza.ifBlank { "pizza" }
+        openApp(context, "dominos", speak)
+        WhatsAppAccessibilityService.runTask(
+            steps = listOf(
+                AutomationStep.Wait(1800),
+                AutomationStep.ClickText("Search"),
+                AutomationStep.Wait(500),
+                AutomationStep.TypeText(query),
+                AutomationStep.Wait(1800),
+                AutomationStep.ClickText(query, exactMatch = false),
+                AutomationStep.Wait(1500),
+                AutomationStep.ClickText("Medium"),
+                AutomationStep.Wait(800),
+                AutomationStep.ClickText("Add"),
+                AutomationStep.Wait(800),
+                AutomationStep.ClickText("Cart")
+            ),
+            onUpdate = { speak(it) },
+            onDone = { speak("Cart's open - the size I picked was medium, change it if you'd like something else.") }
+        )
+        speak("Looking for $query on Domino's.")
+    }
+
+    // ------------------------------------------------------------------
+    // Section 3: YouTube - search -> play first result
+    // ------------------------------------------------------------------
+    private fun runYoutubeSearchFlow(context: Context, query: String, speak: (String) -> Unit) {
+        val term = query.ifBlank { "" }
+        if (term.isBlank()) {
+            speak("What should I search on YouTube?")
+            return
+        }
+        openApp(context, "youtube", speak)
+        WhatsAppAccessibilityService.runTask(
+            steps = listOf(
+                AutomationStep.Wait(1500),
+                AutomationStep.ClickText("Search"),
+                AutomationStep.Wait(500),
+                AutomationStep.TypeText(term),
+                AutomationStep.Wait(1500),
+                AutomationStep.ClickText(term, exactMatch = false)
+            ),
+            onUpdate = { speak(it) },
+            onDone = { speak("Playing $term.") }
+        )
+        speak("Searching YouTube for $term.")
+    }
+
+    // ------------------------------------------------------------------
+    // Section 3: Spotify - search -> play
+    // ------------------------------------------------------------------
+    private fun runSpotifySearchFlow(context: Context, query: String, speak: (String) -> Unit) {
+        val term = query.ifBlank { "" }
+        if (term.isBlank()) {
+            speak("What song should I play?")
+            return
+        }
+        openApp(context, "spotify", speak)
+        WhatsAppAccessibilityService.runTask(
+            steps = listOf(
+                AutomationStep.Wait(1500),
+                AutomationStep.ClickText("Search"),
+                AutomationStep.Wait(500),
+                AutomationStep.TypeText(term),
+                AutomationStep.Wait(1500),
+                AutomationStep.ClickText(term, exactMatch = false)
+            ),
+            onUpdate = { speak(it) },
+            onDone = { speak("Playing $term.") }
+        )
+        speak("Searching Spotify for $term.")
+    }
+
+    private fun parseSwipeDirection(target: String): SwipeDirection? {
+        return when {
+            target.contains("up") -> SwipeDirection.UP
+            target.contains("down") -> SwipeDirection.DOWN
+            target.contains("left") -> SwipeDirection.LEFT
+            target.contains("right") -> SwipeDirection.RIGHT
+            else -> null
         }
     }
 
