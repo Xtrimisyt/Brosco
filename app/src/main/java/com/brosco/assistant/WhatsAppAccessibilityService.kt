@@ -421,10 +421,11 @@ class WhatsAppAccessibilityService : AccessibilityService() {
 
         // Prefer the accessibility long-click action when available - more reliable
         // than a synthetic gesture and doesn't depend on the node's exact bounds.
-        if (node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_LONG_CLICK.id }) {
-            return node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
+        return if (node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
+    true
+} else {
+    longPressNodeCenter(node)
         }
-        return longPressNodeCenter(node)
     }
 
     private fun longPressNodeCenter(node: AccessibilityNodeInfo): Boolean {
