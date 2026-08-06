@@ -13,35 +13,24 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
 /**
- * Brosco's hands: reads what's on screen and acts on it - tapping, typing,
- * scrolling, swiping and long-pressing. Two ways to use it:
+ * Brosco's hands: reads what's on screen and acts on it.
  *
- * 1. One-off "pending" actions (legacy, still used by simple voice commands
- *    like "scroll down" or "click ok").
- * 2. A step queue (see AutomationStep) for whole flows like "search burger,
- *    add to cart, open cart" that need several screens in sequence.
+ * IMPORTANT DESIGN NOTE: everything runs off a self-scheduled Handler loop
+ * (the "ticker"), NOT off onAccessibilityEvent. Static screens (a chat
+ * that isn't receiving new messages, a home feed that already finished
+ * loading) don't generate accessibility events, so anything gated behind
+ * "wait for the next event" can sit there forever. The ticker polls on a
+ * fixed interval regardless of whether the OS sends us anything, so scroll/
+ * swipe/long-press/click all fire promptly no matter what's on screen.
+ * It also keeps onAccessibilityEvent itself doing effectively nothing,
+ * which avoids blocking the OS's event-dispatch callback with heavy tree
+ * walks - that was almost certainly what triggered the accessibility
+ * service being flagged as "malfunctioning" before.
  */
 class WhatsAppAccessibilityService : AccessibilityService() {
 
     companion object {
-        // Existing WhatsApp support
-        var pendingMessage: String? = null
 
-        // Universal one-off actions (simple voice commands)
-        var pendingClickText: String? = null
-        var pendingClickId: String? = null
-        var pendingTypeText: String? = null
-
-        var pendingScrollForward = false
-        var pendingScrollBackward = false
-
-        var pendingBack = false
-        var pendingHome = false
-
-        var pendingLongPressText: String? = null
-        var pendingSwipe: SwipeDirection? = null
-
-        // ---- Multi-step task queue (Section 5: Planning) ----
         private val taskQueue = ArrayDeque<AutomationStep>()
         private var onTaskUpdate: ((String) -> Unit)? = null
         private var onTaskDone: (() -> Unit)? = null
@@ -49,18 +38,18 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         private var currentStepStartedAt = 0L
         private var currentStepAttempts = 0
 
-        private const val STEP_POLL_MS = 350L
-        private const val STEP_TIMEOUT_MS = 7000L // give up on a stuck step after this long
-        private const val MAX_STALL_TICKS = 40    // safety cap regardless of timeout math
+        private const val TICK_MS = 150L
+        private const val STEP_TIMEOUT_MS = 5000L
+        private const val MAX_STALL_TICKS = 30
 
         @Volatile
         private var instance: WhatsAppAccessibilityService? = null
 
         /**
-         * Queue up a whole task ("open zomato -> search burger -> add to cart
-         * -> open cart"). Retries each step until it succeeds or times out,
-         * then moves to the next one. [onUpdate] is called with a short
-         * spoken status after each step; [onDone] fires when the queue drains.
+         * Queue up one or more steps. A single command ("scroll down") is
+         * just a one-item list; a whole flow ("search burger -> add to cart
+         * -> open cart") is a longer one. Calling this again while a task is
+         * still running replaces it - the newest command always wins.
          */
         fun runTask(steps: List<AutomationStep>, onUpdate: (String) -> Unit, onDone: () -> Unit = {}) {
             taskQueue.clear()
@@ -69,7 +58,6 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             onTaskDone = onDone
             currentStepAttempts = 0
             currentStepStartedAt = System.currentTimeMillis()
-            instance?.startTicking()
         }
 
         fun cancelTask() {
@@ -80,115 +68,51 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var alive = false
+
+    // Bounded-search budget shared by the tree-walking helpers below, reset
+    // before each top-level search so one slow tick can't stall the ticker
+    // on a huge/deep node tree (e.g. a long Instagram feed).
+    private var visitBudget = 0
+    private val maxVisits = 2500
 
     private val ticker = object : Runnable {
         override fun run() {
             try {
-                processQueue()
+                tick()
             } catch (e: Exception) {
-                Log.e("Brosco", "Task tick failed: ${e.message}")
+                Log.e("Brosco", "Tick failed: ${e.message}")
             }
-            if (taskQueue.isNotEmpty()) {
-                mainHandler.postDelayed(this, STEP_POLL_MS)
-            }
+            if (alive) mainHandler.postDelayed(this, TICK_MS)
         }
-    }
-
-    private fun startTicking() {
-        mainHandler.removeCallbacks(ticker)
-        mainHandler.post(ticker)
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        alive = true
+        mainHandler.removeCallbacks(ticker)
+        mainHandler.post(ticker)
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        alive = false
         if (instance === this) instance = null
         mainHandler.removeCallbacks(ticker)
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        try {
-            if (event == null) return
+    // Deliberately near-empty: all real work happens in the ticker so this
+    // callback returns immediately and never blocks the OS's event dispatch.
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
 
-            // Existing WhatsApp automation handling
-            if (pendingMessage != null) {
-                mainHandler.postDelayed({
-                    try {
-                        val root = rootInActiveWindow ?: return@postDelayed
-                        val sendButton = findSendButton(root, depth = 0)
-                        if (sendButton != null) {
-                            sendButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            pendingMessage = null
-                        }
-                    } catch (e: Exception) {
-                        Log.e("Brosco", "Send-tap failed: ${e.message}")
-                    }
-                }, 900)
-            }
-
-            // Universal one-off action dispatcher
-            val root = rootInActiveWindow ?: return
-
-            when {
-                pendingClickText != null -> {
-                    clickByTextFuzzy(root, pendingClickText!!)
-                    pendingClickText = null
-                }
-
-                pendingClickId != null -> {
-                    clickById(root, pendingClickId!!)
-                    pendingClickId = null
-                }
-
-                pendingTypeText != null -> {
-                    typeIntoEditableField(root, pendingTypeText!!)
-                    pendingTypeText = null
-                }
-
-                pendingLongPressText != null -> {
-                    longPressByText(root, pendingLongPressText!!)
-                    pendingLongPressText = null
-                }
-
-                pendingSwipe != null -> {
-                    performSwipe(pendingSwipe!!)
-                    pendingSwipe = null
-                }
-
-                pendingScrollForward -> {
-                    root.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
-                    pendingScrollForward = false
-                }
-
-                pendingScrollBackward -> {
-                    root.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
-                    pendingScrollBackward = false
-                }
-
-                pendingBack -> {
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                    pendingBack = false
-                }
-
-                pendingHome -> {
-                    performGlobalAction(GLOBAL_ACTION_HOME)
-                    pendingHome = false
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("Brosco", "Accessibility event failed: ${e.message}")
-        }
-    }
+    override fun onInterrupt() {}
 
     // ------------------------------------------------------------------
-    // Section 5: Planning - task queue executor
+    // Ticker: one step of the queue per tick, retried until it works or
+    // times out, then moves on ("Retry if a step fails").
     // ------------------------------------------------------------------
-
-    private fun processQueue() {
+    private fun tick() {
         val step = taskQueue.firstOrNull() ?: return
         val elapsed = System.currentTimeMillis() - currentStepStartedAt
         var success: Boolean
@@ -221,6 +145,12 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             is AutomationStep.ClickId -> {
                 success = root != null && clickById(root, step.viewId)
             }
+            is AutomationStep.ClickWhatsAppSend -> {
+                success = root != null && clickWhatsAppSend(root)
+            }
+            is AutomationStep.AddItemNear -> {
+                success = root != null && clickAddNear(root, step.label)
+            }
             is AutomationStep.LongPressText -> {
                 success = root != null && longPressByText(root, step.text)
             }
@@ -228,12 +158,10 @@ class WhatsAppAccessibilityService : AccessibilityService() {
                 success = performSwipe(step.direction)
             }
             AutomationStep.ScrollForward -> {
-                root?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
-                success = root != null
+                success = root?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) == true
             }
             AutomationStep.ScrollBackward -> {
-                root?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
-                success = root != null
+                success = root?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) == true
             }
             AutomationStep.GoBack -> {
                 success = performGlobalAction(GLOBAL_ACTION_BACK)
@@ -253,81 +181,48 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             taskQueue.removeFirstOrNull()
             currentStepAttempts = 0
             currentStepStartedAt = System.currentTimeMillis()
-            if (taskQueue.isEmpty()) {
-                onTaskDone?.invoke()
-            }
+            if (taskQueue.isEmpty()) onTaskDone?.invoke()
         } else if (abandon || elapsed > STEP_TIMEOUT_MS || currentStepAttempts > MAX_STALL_TICKS) {
-            // Retry step (Section 5: "Retry if a step fails") already happened via polling;
-            // if it still hasn't worked after the timeout, skip it and keep the rest going.
             Log.w("Brosco", "Giving up on step $step after $currentStepAttempts attempts")
             taskQueue.removeFirstOrNull()
             currentStepAttempts = 0
             currentStepStartedAt = System.currentTimeMillis()
-            if (taskQueue.isEmpty()) {
-                onTaskDone?.invoke()
-            }
+            if (taskQueue.isEmpty()) onTaskDone?.invoke()
         }
-        // else: leave the step at the front of the queue, next tick will retry it
+        // else: leave it at the front, next tick (150ms) retries automatically
     }
 
     // ------------------------------------------------------------------
-    // Helper: find + press the WhatsApp send button (legacy)
+    // WhatsApp send button (id first, content-description fallback)
     // ------------------------------------------------------------------
-    private fun findSendButton(node: AccessibilityNodeInfo?, depth: Int): AccessibilityNodeInfo? {
-        if (node == null || depth > 25) return null
-        return try {
-            val byId = node.findAccessibilityNodeInfosByViewId("com.whatsapp:id/send")
-            if (byId.isNotEmpty()) return byId[0]
-
-            for (i in 0 until node.childCount) {
-                val child = node.getChild(i) ?: continue
-                if (child.contentDescription?.toString()?.equals("Send", ignoreCase = true) == true) {
-                    return child
-                }
-                val found = findSendButton(child, depth + 1)
-                if (found != null) return found
-            }
-            null
-        } catch (e: Exception) {
-            null
+    private fun clickWhatsAppSend(root: AccessibilityNodeInfo): Boolean {
+        val byId = try { root.findAccessibilityNodeInfosByViewId("com.whatsapp:id/send") } catch (e: Exception) { emptyList() }
+        if (byId.isNotEmpty()) {
+            return byId[0].performAction(AccessibilityNodeInfo.ACTION_CLICK)
         }
+        visitBudget = maxVisits
+        val node = findByPredicate(root, depth = 0) {
+            it.contentDescription?.toString()?.equals("Send", ignoreCase = true) == true
+        }
+        return node?.let { clickNodeOrAncestor(it) } ?: false
     }
 
     // ------------------------------------------------------------------
-    // Section 2: Click by exact text/id (kept for simple commands)
+    // Click by text ("contains", forgiving of extra words on real UIs)
     // ------------------------------------------------------------------
-    private fun clickByText(node: AccessibilityNodeInfo?, text: String): Boolean {
-        if (node == null) return false
-
-        if (node.text?.toString()?.equals(text, true) == true ||
-            node.contentDescription?.toString()?.equals(text, true) == true) {
-
-            if (node.isClickable) {
-                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                return true
-            }
-
-            node.parent?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            return true
-        }
-
-        for (i in 0 until node.childCount) {
-            if (clickByText(node.getChild(i), text))
-                return true
-        }
-
-        return false
-    }
-
-    /**
-     * More forgiving click: matches on "contains" (case-insensitive) instead
-     * of exact equality, and walks up to the nearest clickable ancestor if
-     * the matched node itself can't be tapped. This is what app-automation
-     * flows use, since real app UIs rarely have exact-string matches.
-     */
-    private fun clickByTextFuzzy(root: AccessibilityNodeInfo, target: String, exact: Boolean = false): Boolean {
+    private fun clickByTextFuzzy(root: AccessibilityNodeInfo, target: String, exact: Boolean): Boolean {
+        visitBudget = maxVisits
         val match = findNodeByText(root, target, exact, depth = 0) ?: return false
         return clickNodeOrAncestor(match)
+    }
+
+    private fun clickById(root: AccessibilityNodeInfo, id: String): Boolean {
+        return try {
+            val list = root.findAccessibilityNodeInfosByViewId(id)
+            if (list.isNotEmpty()) clickNodeOrAncestor(list[0]) else false
+        } catch (e: Exception) {
+            false
+        }
     }
 
     private fun findNodeByText(
@@ -336,20 +231,48 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         exact: Boolean,
         depth: Int
     ): AccessibilityNodeInfo? {
-        if (node == null || depth > 40) return null
+        if (node == null || depth > 40 || visitBudget <= 0) return null
+        visitBudget--
 
         val nodeText = node.text?.toString()
         val nodeDesc = node.contentDescription?.toString()
+
         val hit = if (exact) {
             nodeText.equals(target, ignoreCase = true) || nodeDesc.equals(target, ignoreCase = true)
         } else {
-            (nodeText?.contains(target, ignoreCase = true) == true) ||
-                (nodeDesc?.contains(target, ignoreCase = true) == true)
+            fuzzyMatch(nodeText, nodeDesc, target)
         }
         if (hit) return node
 
         for (i in 0 until node.childCount) {
             val found = findNodeByText(node.getChild(i), target, exact, depth + 1)
+            if (found != null) return found
+        }
+        return null
+    }
+
+    /** Contains-match first; falls back to "all significant words present" so
+     *  slightly different on-screen wording still matches what was said. */
+    private fun fuzzyMatch(nodeText: String?, nodeDesc: String?, target: String): Boolean {
+        val hay1 = nodeText ?: ""
+        val hay2 = nodeDesc ?: ""
+        if (hay1.contains(target, ignoreCase = true) || hay2.contains(target, ignoreCase = true)) return true
+
+        val words = target.split(Regex("\\s+")).filter { it.length > 2 }
+        if (words.isEmpty()) return false
+        return words.all { w -> hay1.contains(w, ignoreCase = true) || hay2.contains(w, ignoreCase = true) }
+    }
+
+    private fun findByPredicate(
+        node: AccessibilityNodeInfo?,
+        depth: Int,
+        predicate: (AccessibilityNodeInfo) -> Boolean
+    ): AccessibilityNodeInfo? {
+        if (node == null || depth > 40 || visitBudget <= 0) return null
+        visitBudget--
+        if (predicate(node)) return node
+        for (i in 0 until node.childCount) {
+            val found = findByPredicate(node.getChild(i), depth + 1, predicate)
             if (found != null) return found
         }
         return null
@@ -365,33 +288,62 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             current = current.parent
             hops++
         }
-        // fall back to tapping the original node's centre via a gesture
         return tapNodeCenter(node)
     }
 
-    private fun clickById(node: AccessibilityNodeInfo?, id: String): Boolean {
-        if (node == null) return false
+    // ------------------------------------------------------------------
+    // "Add [item]" - find the item's label, then the nearest Add button in
+    // the same row/card (searches the item's own subtree, then walks up
+    // through ancestor containers looking for a sibling "Add" affordance).
+    // ------------------------------------------------------------------
+    private fun clickAddNear(root: AccessibilityNodeInfo, label: String): Boolean {
+        visitBudget = maxVisits
+        val itemNode = findNodeByText(root, label, exact = false, depth = 0) ?: return false
 
-        return try {
-            val list = node.findAccessibilityNodeInfosByViewId(id)
+        visitBudget = maxVisits
+        findAddButton(itemNode, depth = 0)?.let { if (clickNodeOrAncestor(it)) return true }
 
-            if (list.isNotEmpty()) {
-                clickNodeOrAncestor(list[0])
-            } else {
-                false
-            }
-        } catch (e: Exception) {
-            false
+        var container: AccessibilityNodeInfo? = itemNode.parent
+        var hops = 0
+        while (container != null && hops < 6) {
+            visitBudget = maxVisits
+            val addNode = findAddButton(container, depth = 0)
+            if (addNode != null) return clickNodeOrAncestor(addNode)
+            container = container.parent
+            hops++
         }
+        return false
+    }
+
+    private fun findAddButton(node: AccessibilityNodeInfo?, depth: Int): AccessibilityNodeInfo? {
+        if (node == null || depth > 30 || visitBudget <= 0) return null
+        visitBudget--
+
+        val t = node.text?.toString()?.trim()
+        val d = node.contentDescription?.toString()?.trim()
+        val looksLikeAdd = t.equals("add", ignoreCase = true) || d.equals("add", ignoreCase = true) ||
+            (t != null && t.length <= 6 && t.startsWith("add", ignoreCase = true)) ||
+            (d != null && d.length <= 6 && d.startsWith("add", ignoreCase = true))
+
+        if (looksLikeAdd) return node
+
+        for (i in 0 until node.childCount) {
+            val found = findAddButton(node.getChild(i), depth + 1)
+            if (found != null) return found
+        }
+        return null
     }
 
     // ------------------------------------------------------------------
-    // Section 2: Type text into search bars / chat boxes / any input
+    // Type text into search bars / chat boxes / any input field
     // ------------------------------------------------------------------
     private fun typeIntoEditableField(root: AccessibilityNodeInfo, text: String): Boolean {
+        visitBudget = maxVisits
         val field = findEditableNode(root, depth = 0) ?: return false
 
-        // Make sure it's focused first - some apps ignore ACTION_SET_TEXT otherwise.
+        // Tap first - some search bars won't accept ACTION_SET_TEXT until
+        // they've actually been focused by a "real" interaction.
+        field.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         if (!field.isFocused) {
             field.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         }
@@ -402,8 +354,11 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     }
 
     private fun findEditableNode(node: AccessibilityNodeInfo?, depth: Int): AccessibilityNodeInfo? {
-        if (node == null || depth > 40) return null
-        if (node.isEditable || node.className?.toString()?.contains("EditText") == true) {
+        if (node == null || depth > 40 || visitBudget <= 0) return null
+        visitBudget--
+
+        val editableByAction = node.actionList?.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT.id } == true
+        if (node.isEditable || editableByAction || node.className?.toString()?.contains("EditText") == true) {
             return node
         }
         for (i in 0 until node.childCount) {
@@ -414,18 +369,16 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     }
 
     // ------------------------------------------------------------------
-    // Section 2: Long press
+    // Long press
     // ------------------------------------------------------------------
     private fun longPressByText(root: AccessibilityNodeInfo, text: String): Boolean {
+        visitBudget = maxVisits
         val node = findNodeByText(root, text, exact = false, depth = 0) ?: return false
 
-        // Prefer the accessibility long-click action when available - more reliable
-        // than a synthetic gesture and doesn't depend on the node's exact bounds.
-        return if (node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
-    true
-} else {
-    longPressNodeCenter(node)
+        if (node.actionList?.any { it.id == AccessibilityNodeInfo.ACTION_LONG_CLICK.id } == true) {
+            return node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
         }
+        return longPressNodeCenter(node)
     }
 
     private fun longPressNodeCenter(node: AccessibilityNodeInfo): Boolean {
@@ -451,7 +404,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     }
 
     // ------------------------------------------------------------------
-    // Section 2: Swipe gestures
+    // Swipe gestures
     // ------------------------------------------------------------------
     private fun performSwipe(direction: SwipeDirection): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
@@ -473,10 +426,8 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             moveTo(startX, startY)
             lineTo(endX, endY)
         }
-        val stroke = GestureDescription.StrokeDescription(path, 0, 250)
+        val stroke = GestureDescription.StrokeDescription(path, 0, 200)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
         return dispatchGesture(gesture, null, null)
     }
-
-    override fun onInterrupt() {}
 }
