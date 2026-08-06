@@ -1,5 +1,6 @@
 package com.brosco.assistant
 
+import android.util.Log
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -14,6 +15,7 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +34,8 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
 
     private var expectingCommand = false
     private var isSpeaking = false
+    private var consecutiveErrors = 0
+    private var cyclesSinceRecreate = 0
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -70,6 +74,8 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
 
             override fun onResults(results: Bundle?) {
 
+                consecutiveErrors = 0
+
                 val matches =
                     results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
 
@@ -83,6 +89,8 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
             }
 
             override fun onError(error: Int) {
+                consecutiveErrors++
+                Log.w("Brosco", "Recognizer error $error, consecutive=$consecutiveErrors")
                 restart()
             }
 
@@ -109,28 +117,49 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
         if (!isRunning) return
         if (isSpeaking) return
 
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-            )
-            putExtra(
-                RecognizerIntent.EXTRA_CALLING_PACKAGE,
-                packageName
-            )
-        }
+        cyclesSinceRecreate++
+
+        // Android's on-device recognizer tends to wedge itself (stops firing
+        // callbacks entirely, e.g. after repeated ERROR_RECOGNIZER_BUSY) if the
+        // same instance is reused for too many cycles in a row, especially with
+        // no foreground Activity. Periodically tear it down and build a fresh one.
+        val needsRecreate = consecutiveErrors >= 3 || cyclesSinceRecreate >= 20
+        val delayMs = if (consecutiveErrors >= 3) 2000L else 500L
 
         mainHandler.postDelayed({
 
             if (!isRunning || isSpeaking) return@postDelayed
 
+            if (needsRecreate) {
+                try {
+                    recognizer?.destroy()
+                } catch (_: Exception) {
+                }
+                consecutiveErrors = 0
+                cyclesSinceRecreate = 0
+                startListeningLoop()
+                return@postDelayed
+            }
+
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(
+                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                )
+                putExtra(
+                    RecognizerIntent.EXTRA_CALLING_PACKAGE,
+                    packageName
+                )
+            }
+
             try {
                 recognizer?.cancel()
                 recognizer?.startListening(intent)
             } catch (_: Exception) {
+                consecutiveErrors++
             }
 
-        }, 500)
+        }, delayMs)
     }
 
     private fun handleHeard(heard: String) {
@@ -248,4 +277,4 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
         tts = null
     }
 }
-        
+    
