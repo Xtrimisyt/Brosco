@@ -1,4 +1,4 @@
-          package com.brosco.assistant
+package com.brosco.assistant
 
 import android.content.Context
 import android.content.Intent
@@ -58,35 +58,43 @@ object CommandProcessor {
             detectedIntent.type == IntentType.DOMINOS_ORDER -> {
                 runDominosFlow(context, detectedIntent.target, speak)
             }
+            detectedIntent.type == IntentType.ADD_ITEM -> {
+                if (detectedIntent.target.isBlank()) {
+                    speak("Add what?")
+                } else {
+                    WhatsAppAccessibilityService.runTask(
+                        listOf(AutomationStep.AddItemNear(detectedIntent.target)),
+                        onUpdate = { speak(it) },
+                        onDone = { speak("Added ${detectedIntent.target}.") }
+                    )
+                }
+            }
             detectedIntent.type == IntentType.YOUTUBE_SEARCH -> {
                 runYoutubeSearchFlow(context, detectedIntent.target, speak)
             }
             detectedIntent.type == IntentType.YOUTUBE_PAUSE -> {
-                WhatsAppAccessibilityService.pendingClickText = "pause video"
+                WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ClickText("pause video")), onUpdate = {})
                 speak("Pausing.")
             }
             detectedIntent.type == IntentType.YOUTUBE_NEXT -> {
-                WhatsAppAccessibilityService.pendingClickText = "next video"
+                WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ClickText("next video")), onUpdate = {})
                 speak("Next video.")
             }
             detectedIntent.type == IntentType.SPOTIFY_SEARCH -> {
                 runSpotifySearchFlow(context, detectedIntent.target, speak)
             }
             detectedIntent.type == IntentType.SPOTIFY_PAUSE -> {
-                WhatsAppAccessibilityService.pendingClickText = "pause"
+                WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ClickText("pause")), onUpdate = {})
                 speak("Pausing the music.")
             }
             detectedIntent.type == IntentType.SPOTIFY_NEXT -> {
-                WhatsAppAccessibilityService.pendingClickText = "skip to next"
+                WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ClickText("skip to next")), onUpdate = {})
                 speak("Skipping.")
             }
             detectedIntent.type == IntentType.INSTAGRAM_SCROLL_FEED -> {
                 openApp(context, "instagram", speak)
                 WhatsAppAccessibilityService.runTask(
-                    listOf(
-                        AutomationStep.Wait(1200),
-                        AutomationStep.Swipe(SwipeDirection.UP)
-                    ),
+                    listOf(AutomationStep.Wait(1000), AutomationStep.Swipe(SwipeDirection.UP)),
                     onUpdate = {}
                 )
                 speak("Scrolling your feed.")
@@ -94,24 +102,27 @@ object CommandProcessor {
             detectedIntent.type == IntentType.INSTAGRAM_OPEN_REELS -> {
                 openApp(context, "instagram", speak)
                 WhatsAppAccessibilityService.runTask(
-                    listOf(
-                        AutomationStep.Wait(1200),
-                        AutomationStep.ClickText("Reels")
-                    ),
+                    listOf(AutomationStep.Wait(1000), AutomationStep.ClickText("Reels")),
                     onUpdate = { speak(it) }
                 )
                 speak("Opening reels.")
             }
             detectedIntent.type == IntentType.INSTAGRAM_LIKE -> {
-                WhatsAppAccessibilityService.pendingClickId = "com.instagram.android:id/row_feed_button_like"
+                WhatsAppAccessibilityService.runTask(
+                    listOf(AutomationStep.ClickId("com.instagram.android:id/row_feed_button_like")),
+                    onUpdate = {}
+                )
                 speak("Liking that.")
             }
             detectedIntent.type == IntentType.INSTAGRAM_FOLLOW -> {
-                WhatsAppAccessibilityService.pendingClickText = "follow"
+                WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ClickText("follow")), onUpdate = {})
                 speak("Following.")
             }
 
-            // Section 2: universal gestures / single actions
+            // Section 2: universal gestures / single actions - all go through
+            // runTask now so they don't depend on an accessibility event
+            // arriving to get picked up (that was the bug: static screens
+            // never fired one, so scroll/swipe/long-press just sat there).
             detectedIntent.type == IntentType.OPEN_APP -> {
                 openApp(context, detectedIntent.target, speak)
             }
@@ -122,24 +133,24 @@ object CommandProcessor {
                 openZomatoSearch(context, detectedIntent.target, speak)
             }
             detectedIntent.type == IntentType.GO_BACK -> {
-                WhatsAppAccessibilityService.pendingBack = true
+                WhatsAppAccessibilityService.runTask(listOf(AutomationStep.GoBack), onUpdate = {})
                 speak("Going back.")
             }
             detectedIntent.type == IntentType.GO_HOME -> {
-                WhatsAppAccessibilityService.pendingHome = true
+                WhatsAppAccessibilityService.runTask(listOf(AutomationStep.GoHome), onUpdate = {})
                 speak("Going home.")
             }
             detectedIntent.type == IntentType.SCROLL_DOWN -> {
-                WhatsAppAccessibilityService.pendingScrollForward = true
+                WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ScrollForward), onUpdate = {})
                 speak("Scrolling down.")
             }
             detectedIntent.type == IntentType.SCROLL_UP -> {
-                WhatsAppAccessibilityService.pendingScrollBackward = true
+                WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ScrollBackward), onUpdate = {})
                 speak("Scrolling up.")
             }
             detectedIntent.type == IntentType.TYPE_TEXT -> {
                 if (detectedIntent.target.isNotBlank()) {
-                    WhatsAppAccessibilityService.pendingTypeText = detectedIntent.target
+                    WhatsAppAccessibilityService.runTask(listOf(AutomationStep.TypeText(detectedIntent.target)), onUpdate = {})
                     speak("Typing ${detectedIntent.target}.")
                 } else {
                     speak("What should I type?")
@@ -147,7 +158,7 @@ object CommandProcessor {
             }
             detectedIntent.type == IntentType.LONG_PRESS -> {
                 if (detectedIntent.target.isNotBlank()) {
-                    WhatsAppAccessibilityService.pendingLongPressText = detectedIntent.target
+                    WhatsAppAccessibilityService.runTask(listOf(AutomationStep.LongPressText(detectedIntent.target)), onUpdate = {})
                     speak("Holding ${detectedIntent.target}.")
                 } else {
                     speak("What should I long-press?")
@@ -156,7 +167,7 @@ object CommandProcessor {
             detectedIntent.type == IntentType.SWIPE -> {
                 val direction = parseSwipeDirection(detectedIntent.target)
                 if (direction != null) {
-                    WhatsAppAccessibilityService.pendingSwipe = direction
+                    WhatsAppAccessibilityService.runTask(listOf(AutomationStep.Swipe(direction)), onUpdate = {})
                     speak("Swiping ${detectedIntent.target}.")
                 } else {
                     speak("Swipe which way - up, down, left or right?")
@@ -164,7 +175,7 @@ object CommandProcessor {
             }
             detectedIntent.type == IntentType.CLICK_ID -> {
                 if (detectedIntent.target.isNotBlank()) {
-                    WhatsAppAccessibilityService.pendingClickId = detectedIntent.target
+                    WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ClickId(detectedIntent.target)), onUpdate = {})
                     speak("Clicking that element.")
                 } else {
                     speak("Which view id?")
@@ -172,7 +183,7 @@ object CommandProcessor {
             }
             detectedIntent.type == IntentType.CLICK -> {
                 if (detectedIntent.target.isNotBlank()) {
-                    WhatsAppAccessibilityService.pendingClickText = detectedIntent.target
+                    WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ClickText(detectedIntent.target)), onUpdate = {})
                     speak("Clicking ${detectedIntent.target}.")
                 } else {
                     speak("What should I click?")
@@ -241,9 +252,7 @@ object CommandProcessor {
         scope.launch {
             for ((index, piece) in pieces.withIndex()) {
                 process(context, piece, this, speak)
-                // Give each step's screen time to settle before firing the next
-                // voice command on top of it (Section 5: execute one after another).
-                if (index < pieces.lastIndex) delay(2500)
+                if (index < pieces.lastIndex) delay(2000)
             }
         }
     }
@@ -256,15 +265,15 @@ object CommandProcessor {
         openApp(context, "zomato", speak)
         WhatsAppAccessibilityService.runTask(
             steps = listOf(
-                AutomationStep.Wait(1800),
+                AutomationStep.Wait(1400),
                 AutomationStep.ClickText("Search"),
-                AutomationStep.Wait(500),
+                AutomationStep.Wait(400),
                 AutomationStep.TypeText(query),
-                AutomationStep.Wait(1800),
+                AutomationStep.Wait(1400),
                 AutomationStep.ClickText(query, exactMatch = false),
-                AutomationStep.Wait(1800),
+                AutomationStep.Wait(1400),
                 AutomationStep.ClickText("Add"),
-                AutomationStep.Wait(800),
+                AutomationStep.Wait(600),
                 AutomationStep.ClickText("View Cart")
             ),
             onUpdate = { speak(it) },
@@ -281,17 +290,17 @@ object CommandProcessor {
         openApp(context, "dominos", speak)
         WhatsAppAccessibilityService.runTask(
             steps = listOf(
-                AutomationStep.Wait(1800),
+                AutomationStep.Wait(1400),
                 AutomationStep.ClickText("Search"),
-                AutomationStep.Wait(500),
+                AutomationStep.Wait(400),
                 AutomationStep.TypeText(query),
-                AutomationStep.Wait(1800),
+                AutomationStep.Wait(1400),
                 AutomationStep.ClickText(query, exactMatch = false),
-                AutomationStep.Wait(1500),
+                AutomationStep.Wait(1200),
                 AutomationStep.ClickText("Medium"),
-                AutomationStep.Wait(800),
+                AutomationStep.Wait(600),
                 AutomationStep.ClickText("Add"),
-                AutomationStep.Wait(800),
+                AutomationStep.Wait(600),
                 AutomationStep.ClickText("Cart")
             ),
             onUpdate = { speak(it) },
@@ -312,11 +321,11 @@ object CommandProcessor {
         openApp(context, "youtube", speak)
         WhatsAppAccessibilityService.runTask(
             steps = listOf(
-                AutomationStep.Wait(1500),
+                AutomationStep.Wait(1200),
                 AutomationStep.ClickText("Search"),
-                AutomationStep.Wait(500),
+                AutomationStep.Wait(400),
                 AutomationStep.TypeText(term),
-                AutomationStep.Wait(1500),
+                AutomationStep.Wait(1200),
                 AutomationStep.ClickText(term, exactMatch = false)
             ),
             onUpdate = { speak(it) },
@@ -337,11 +346,11 @@ object CommandProcessor {
         openApp(context, "spotify", speak)
         WhatsAppAccessibilityService.runTask(
             steps = listOf(
-                AutomationStep.Wait(1500),
+                AutomationStep.Wait(1200),
                 AutomationStep.ClickText("Search"),
-                AutomationStep.Wait(500),
+                AutomationStep.Wait(400),
                 AutomationStep.TypeText(term),
-                AutomationStep.Wait(1500),
+                AutomationStep.Wait(1200),
                 AutomationStep.ClickText(term, exactMatch = false)
             ),
             onUpdate = { speak(it) },
@@ -367,13 +376,18 @@ object CommandProcessor {
             return
         }
         val cleanNumber = number.replace(Regex("[^0-9+]"), "")
-        WhatsAppAccessibilityService.pendingMessage = message
         val encodedMsg = URLEncoder.encode(message, "UTF-8")
         val uri = Uri.parse("https://api.whatsapp.com/send?phone=$cleanNumber&text=$encodedMsg")
         val intent = Intent(Intent.ACTION_VIEW, uri)
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
             context.startActivity(intent)
+            // Send button click is now driven by the ticker/task queue too,
+            // so it no longer depends on an accessibility event arriving.
+            WhatsAppAccessibilityService.runTask(
+                listOf(AutomationStep.Wait(1000), AutomationStep.ClickWhatsAppSend),
+                onUpdate = {}
+            )
             speak("Sending to $name on WhatsApp")
         } catch (e: Exception) {
             speak("Couldn't open WhatsApp")
