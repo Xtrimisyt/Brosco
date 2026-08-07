@@ -5,6 +5,8 @@ import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.LinearGradient
+import android.graphics.Shader
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -12,6 +14,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.view.View
 import android.view.animation.LinearInterpolator
 import android.widget.Button
 import android.widget.EditText
@@ -30,6 +33,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var statusText: TextView
     private lateinit var responseText: TextView
     private lateinit var micButton: Button
+    private lateinit var pulseRing1: View
+    private lateinit var pulseRing2: View
+    private var ringAnimSet: android.animation.AnimatorSet? = null
     private lateinit var textInput: EditText
     private lateinit var sendTextButton: Button
     private lateinit var alwaysListenButton: Button
@@ -50,11 +56,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         statusText = findViewById(R.id.statusText)
         responseText = findViewById(R.id.responseText)
         micButton = findViewById(R.id.micButton)
+        pulseRing1 = findViewById(R.id.pulseRing1)
+        pulseRing2 = findViewById(R.id.pulseRing2)
         textInput = findViewById(R.id.textInput)
         sendTextButton = findViewById(R.id.sendTextButton)
         alwaysListenButton = findViewById(R.id.alwaysListenButton)
         backgroundServiceButton = findViewById(R.id.backgroundServiceButton)
         tts = TextToSpeech(this, this)
+
+        statusText.post { applyTitleGradient() }
 
         ensurePermissions()
         updateBackgroundButtonLabel()
@@ -182,10 +192,27 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    private fun applyTitleGradient() {
+        val width = statusText.width.toFloat()
+        if (width <= 0f) return
+        val shader = LinearGradient(
+            0f, 0f, width, 0f,
+            intArrayOf(
+                android.graphics.Color.parseColor("#7F5AF0"),
+                android.graphics.Color.parseColor("#2CB1FF"),
+                android.graphics.Color.parseColor("#00E5C7")
+            ),
+            null,
+            Shader.TileMode.CLAMP
+        )
+        statusText.paint.shader = shader
+        statusText.invalidate()
+    }
+
     private fun startPulse() {
         pulseAnimator?.cancel()
-        val animator = ObjectAnimator.ofFloat(micButton, "scaleX", 1f, 1.15f, 1f)
-        val animatorY = ObjectAnimator.ofFloat(micButton, "scaleY", 1f, 1.15f, 1f)
+        val animator = ObjectAnimator.ofFloat(micButton, "scaleX", 1f, 1.1f, 1f)
+        val animatorY = ObjectAnimator.ofFloat(micButton, "scaleY", 1f, 1.1f, 1f)
         animator.duration = 700
         animatorY.duration = 700
         animator.repeatCount = ValueAnimator.INFINITE
@@ -195,6 +222,38 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         animator.start()
         animatorY.start()
         pulseAnimator = animator
+
+        startRingPulse()
+    }
+
+    private fun startRingPulse() {
+        ringAnimSet?.cancel()
+        val set1 = buildRingAnimator(pulseRing1, 0L)
+        val set2 = buildRingAnimator(pulseRing2, 550L)
+        val combined = android.animation.AnimatorSet()
+        combined.playTogether(set1, set2)
+        combined.start()
+        ringAnimSet = combined
+    }
+
+    private fun buildRingAnimator(ring: View, startDelay: Long): android.animation.AnimatorSet {
+        ring.scaleX = 1f
+        ring.scaleY = 1f
+        ring.alpha = 0.7f
+
+        val scaleX = ObjectAnimator.ofFloat(ring, "scaleX", 1f, 1.9f)
+        val scaleY = ObjectAnimator.ofFloat(ring, "scaleY", 1f, 1.9f)
+        val alpha = ObjectAnimator.ofFloat(ring, "alpha", 0.7f, 0f)
+
+        listOf(scaleX, scaleY, alpha).forEach {
+            it.duration = 1400
+            it.repeatCount = ValueAnimator.INFINITE
+            it.startDelay = startDelay
+        }
+
+        val set = android.animation.AnimatorSet()
+        set.playTogether(scaleX, scaleY, alpha)
+        return set
     }
 
     private fun stopPulse() {
@@ -202,6 +261,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             pulseAnimator?.cancel()
             micButton.scaleX = 1f
             micButton.scaleY = 1f
+            ringAnimSet?.cancel()
+            pulseRing1.alpha = 0f
+            pulseRing2.alpha = 0f
         }
     }
 
