@@ -65,6 +65,15 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         }
 
         fun isTaskRunning(): Boolean = taskQueue.isNotEmpty()
+
+        /**
+         * Section 4 (Vision, lightweight version): instead of analysing pixels,
+         * we list every currently-tappable element with its label and screen
+         * position. CommandProcessor sends this list + the spoken phrase to the
+         * AI to resolve ordinals ("the first video") and vague references
+         * ("that", "the one next to it") that plain text matching can't handle.
+         */
+        fun snapshotScreen(): List<ScreenElement> = instance?.captureScreenSnapshot() ?: emptyList()
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -74,7 +83,19 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     // before each top-level search so one slow tick can't stall the ticker
     // on a huge/deep node tree (e.g. a long Instagram feed).
     private var visitBudget = 0
-    private val maxVisits = 2500
+    private val maxVisits = 800
+
+    // Hard wall-clock cap per tick, IN ADDITION to the node-count budget.
+    // Each node access can be a Binder IPC call into another app's process,
+    // so visit count alone doesn't bound worst-case time if that app is
+    // slow to respond - this does. This is almost certainly what was
+    // tripping Android's "service is malfunctioning" detector: without it,
+    // a single tick (e.g. the multi-hop "add item near" search) could block
+    // the main thread long enough to get flagged as unresponsive.
+    private var tickDeadline = 0L
+    private val tickBudgetMs = 120L
+
+    private fun withinBudget(): Boolean = visitBudget > 0 && System.currentTimeMillis() < tickDeadline
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -114,6 +135,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     // ------------------------------------------------------------------
     private fun tick() {
         val step = taskQueue.firstOrNull() ?: return
+        tickDeadline = System.currentTimeMillis() + tickBudgetMs
         val elapsed = System.currentTimeMillis() - currentStepStartedAt
         var success: Boolean
         var abandon = false
@@ -154,6 +176,9 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             is AutomationStep.LongPressText -> {
                 success = root != null && longPressByText(root, step.text)
             }
+            is AutomationStep.TapAt -> {
+                success = dispatchTap(step.x, step.y, holdMs = 60)
+            }
             is AutomationStep.Swipe -> {
                 success = performSwipe(step.direction)
             }
@@ -190,6 +215,45 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             if (taskQueue.isEmpty()) onTaskDone?.invoke()
         }
         // else: leave it at the front, next tick (150ms) retries automatically
+    }
+
+    // ------------------------------------------------------------------
+    // Screen snapshot for AI-assisted "smart click" (ordinals, "this"/"that")
+    // ------------------------------------------------------------------
+    private fun captureScreenSnapshot(): List<ScreenElement> {
+        val root = rootInActiveWindow ?: return emptyList()
+        visitBudget = maxVisits
+        val raw = mutableListOf<ScreenElement>()
+        collectClickables(root, depth = 0, raw)
+
+        // Reading order: top-to-bottom, then left-to-right - matches how a
+        // person would say "the first one" while looking at the screen.
+        return raw.sortedWith(compareBy({ it.y }, { it.x }))
+            .take(50)
+            .mapIndexed { i, e -> e.copy(index = i + 1) }
+    }
+
+    private fun collectClickables(node: AccessibilityNodeInfo?, depth: Int, out: MutableList<ScreenElement>) {
+        if (node == null || depth > 40 || !withinBudget()) return
+        visitBudget--
+
+        if ((node.isClickable || node.isLongClickable) && node.isVisibleToUser) {
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            if (!bounds.isEmpty) {
+                val label = node.text?.toString()?.takeIf { it.isNotBlank() }
+                    ?: node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+                    ?: node.className?.toString()?.substringAfterLast(".") ?: ""
+
+                if (label.isNotBlank()) {
+                    out.add(ScreenElement(0, label.take(60), bounds.centerX().toFloat(), bounds.centerY().toFloat()))
+                }
+            }
+        }
+
+        for (i in 0 until node.childCount) {
+            collectClickables(node.getChild(i), depth + 1, out)
+        }
     }
 
     // ------------------------------------------------------------------
@@ -231,16 +295,16 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         exact: Boolean,
         depth: Int
     ): AccessibilityNodeInfo? {
-        if (node == null || depth > 40 || visitBudget <= 0) return null
+        if (node == null || depth > 40 || !withinBudget()) return null
         visitBudget--
 
         val nodeText = node.text?.toString()
         val nodeDesc = node.contentDescription?.toString()
 
         val hit = if (exact) {
-            nodeText.equals(target, ignoreCase = true) || nodeDesc.equals(target, ignoreCase = true)
+            (nodeText.equals(target, ignoreCase = true) || nodeDesc.equals(target, ignoreCase = true)) && !node.isEditable
         } else {
-            fuzzyMatch(nodeText, nodeDesc, target)
+            fuzzyMatch(nodeText, nodeDesc, target) && !node.isEditable
         }
         if (hit) return node
 
@@ -268,7 +332,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         depth: Int,
         predicate: (AccessibilityNodeInfo) -> Boolean
     ): AccessibilityNodeInfo? {
-        if (node == null || depth > 40 || visitBudget <= 0) return null
+        if (node == null || depth > 40 || !withinBudget()) return null
         visitBudget--
         if (predicate(node)) return node
         for (i in 0 until node.childCount) {
@@ -300,13 +364,14 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         visitBudget = maxVisits
         val itemNode = findNodeByText(root, label, exact = false, depth = 0) ?: return false
 
-        visitBudget = maxVisits
+        // Deliberately NOT resetting visitBudget again here - the whole
+        // operation (item search + subtree check + up to 6 ancestor hops)
+        // shares one budget so a single tick can't blow past its time cap.
         findAddButton(itemNode, depth = 0)?.let { if (clickNodeOrAncestor(it)) return true }
 
         var container: AccessibilityNodeInfo? = itemNode.parent
         var hops = 0
-        while (container != null && hops < 6) {
-            visitBudget = maxVisits
+        while (container != null && hops < 6 && withinBudget()) {
             val addNode = findAddButton(container, depth = 0)
             if (addNode != null) return clickNodeOrAncestor(addNode)
             container = container.parent
@@ -316,7 +381,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     }
 
     private fun findAddButton(node: AccessibilityNodeInfo?, depth: Int): AccessibilityNodeInfo? {
-        if (node == null || depth > 30 || visitBudget <= 0) return null
+        if (node == null || depth > 30 || !withinBudget()) return null
         visitBudget--
 
         val t = node.text?.toString()?.trim()
@@ -350,11 +415,23 @@ class WhatsAppAccessibilityService : AccessibilityService() {
 
         val args = Bundle()
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
-        return field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        val set = field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+
+        // Best-effort "press search/enter" so live-search apps actually
+        // populate results instead of leaving the query sitting in the box.
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                field.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+            } catch (e: Exception) {
+                // not all fields support it - harmless if this fails
+            }
+        }
+
+        return set
     }
 
     private fun findEditableNode(node: AccessibilityNodeInfo?, depth: Int): AccessibilityNodeInfo? {
-        if (node == null || depth > 40 || visitBudget <= 0) return null
+        if (node == null || depth > 40 || !withinBudget()) return null
         visitBudget--
 
         val editableByAction = node.actionList?.contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_TEXT) == true
@@ -372,9 +449,10 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     // Long press
     // ------------------------------------------------------------------
     private fun longPressByText(root: AccessibilityNodeInfo, text: String): Boolean {
-    val node = findNodeByText(root, text, exact = false, depth = 0) ?: return false
+        visitBudget = maxVisits
+        val node = findNodeByText(root, text, exact = false, depth = 0) ?: return false
 
-    return if (node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
+        return if (node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)) {
         true
     } else {
         longPressNodeCenter(node)
