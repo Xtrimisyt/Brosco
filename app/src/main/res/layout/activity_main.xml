@@ -1,67 +1,121 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:gravity="center"
-    android:padding="32dp"
-    android:background="#101014">
+    android:background="@drawable/bg_gradient">
 
-    <TextView
-        android:id="@+id/statusText"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Brosco"
-        android:textSize="28sp"
-        android:textColor="#FFFFFF"
-        android:layout_marginBottom="16dp"/>
-
-    <TextView
-        android:id="@+id/responseText"
+    <ScrollView
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Tap the mic, type below, or enable listening."
-        android:textSize="16sp"
-        android:textColor="#B0B0B0"
-        android:gravity="center"
-        android:layout_marginBottom="24dp"/>
+        android:layout_height="match_parent"
+        android:fillViewport="true">
 
-    <Button
-        android:id="@+id/micButton"
-        android:layout_width="120dp"
-        android:layout_height="120dp"
-        android:text="🎤"
-        android:textSize="36sp"
-        android:layout_marginBottom="20dp"/>
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:padding="32dp">
 
-    <EditText
-        android:id="@+id/textInput"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="Type a command instead..."
-        android:textColorHint="#777777"
-        android:textColor="#FFFFFF"
-        android:padding="12dp"
-        android:layout_marginBottom="12dp"/>
+            <TextView
+                android:id="@+id/statusText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:text="Brosco"
+                android:textSize="42sp"
+                android:textStyle="bold"
+                android:letterSpacing="0.02"
+                android:textColor="#FFFFFF"
+                android:layout_marginBottom="10dp"/>
 
-    <Button
-        android:id="@+id/sendTextButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Send"
-        android:layout_marginBottom="20dp"/>
+            <TextView
+                android:id="@+id/responseText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Tap the mic, type below, or enable listening."
+                android:textSize="15sp"
+                android:textColor="#9B95C9"
+                android:gravity="center"
+                android:layout_marginBottom="40dp"/>
 
-    <Button
-        android:id="@+id/alwaysListenButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Enable Always-Listen (app open)"
-        android:layout_marginBottom="12dp"/>
+            <!-- Mic with animated pulse rings behind it -->
+            <FrameLayout
+                android:layout_width="220dp"
+                android:layout_height="220dp"
+                android:layout_marginBottom="36dp">
 
-    <Button
-        android:id="@+id/backgroundServiceButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Start Background Brosco"/>
+                <View
+                    android:id="@+id/pulseRing1"
+                    android:layout_width="140dp"
+                    android:layout_height="140dp"
+                    android:layout_gravity="center"
+                    android:background="@drawable/pulse_ring"
+                    android:alpha="0"/>
 
-</LinearLayout>
+                <View
+                    android:id="@+id/pulseRing2"
+                    android:layout_width="140dp"
+                    android:layout_height="140dp"
+                    android:layout_gravity="center"
+                    android:background="@drawable/pulse_ring"
+                    android:alpha="0"/>
+
+                <Button
+                    android:id="@+id/micButton"
+                    android:layout_width="128dp"
+                    android:layout_height="128dp"
+                    android:layout_gravity="center"
+                    android:background="@drawable/mic_button_bg"
+                    android:text="🎤"
+                    android:textSize="40sp"
+                    android:stateListAnimator="@null"
+                    android:elevation="8dp"/>
+
+            </FrameLayout>
+
+            <EditText
+                android:id="@+id/textInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/rounded_input_bg"
+                android:hint="Type a command instead..."
+                android:textColorHint="#6E6795"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp"
+                android:layout_marginBottom="16dp"/>
+
+            <Button
+                android:id="@+id/sendTextButton"
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:background="@drawable/rounded_button_primary"
+                android:text="SEND"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                android:stateListAnimator="@null"
+                android:layout_marginBottom="24dp"/>
+
+            <Button
+                android:id="@+id/alwaysListenButton"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:background="@drawable/rounded_button_outline"
+                android:text="ENABLE ALWAYS-LISTEN (APP OPEN)"
+                android:textColor="#C9C3F5"
+                android:textSize="12sp"
+                android:stateListAnimator="@null"
+                android:layout_marginBottom="14dp"/>
+
+            <Button
+                android:id="@+id/backgroundServiceButton"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:background="@drawable/rounded_button_outline"
+                android:text="START BACKGROUND BROSCO"
+                android:textColor="#C9C3F5"
+                android:textSize="12sp"
+                android:stateListAnimator="@null"/>
+
+        </LinearLayout>
+    </ScrollView>
+</FrameLayout>
