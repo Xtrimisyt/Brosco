@@ -28,6 +28,9 @@ sealed class AutomationStep {
     /** Find a label on screen (e.g. a dish name) and tap the nearest "Add" affordance next to it. */
     data class AddItemNear(val label: String) : AutomationStep()
 
+    /** Tap a raw screen coordinate directly (used by the AI-assisted "smart click" resolver). */
+    data class TapAt(val x: Float, val y: Float) : AutomationStep()
+
     /** Swipe across the screen in a direction. */
     data class Swipe(val direction: SwipeDirection) : AutomationStep()
 
@@ -44,3 +47,6 @@ sealed class AutomationStep {
 }
 
 enum class SwipeDirection { UP, DOWN, LEFT, RIGHT }
+
+/** A tappable element currently on screen, captured for the AI-assisted "smart click" resolver. */
+data class ScreenElement(val index: Int, val label: String, val x: Float, val y: Float)
