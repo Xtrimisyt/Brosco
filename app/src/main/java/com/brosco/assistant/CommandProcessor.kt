@@ -17,6 +17,8 @@ object CommandProcessor {
     private val appPackages = mapOf(
         "whatsapp" to "com.whatsapp",
         "spotify" to "com.spotify.music",
+        "jiosaavn" to "com.jio.media.jiobeats",
+        "saavn" to "com.jio.media.jiobeats",
         "youtube" to "com.google.android.youtube",
         "instagram" to "com.instagram.android",
         "gmail" to "com.google.android.gm",
@@ -107,6 +109,17 @@ object CommandProcessor {
             }
             detectedIntent.type == IntentType.SPOTIFY_NEXT -> {
                 WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ClickText("skip to next")), onUpdate = {})
+                speak("Skipping.")
+            }
+            detectedIntent.type == IntentType.JIOSAAVN_SEARCH -> {
+                runJioSaavnSearchFlow(context, detectedIntent.target, speak)
+            }
+            detectedIntent.type == IntentType.JIOSAAVN_PAUSE -> {
+                WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ClickText("pause")), onUpdate = {})
+                speak("Pausing.")
+            }
+            detectedIntent.type == IntentType.JIOSAAVN_NEXT -> {
+                WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ClickText("next")), onUpdate = {})
                 speak("Skipping.")
             }
             detectedIntent.type == IntentType.INSTAGRAM_SCROLL_FEED -> {
@@ -405,6 +418,33 @@ object CommandProcessor {
         )
         speak("Searching Spotify for $term.")
     }
+
+    // ------------------------------------------------------------------
+    // Section 3: JioSaavn - search -> play (same pattern as Spotify)
+    // ------------------------------------------------------------------
+    private fun runJioSaavnSearchFlow(context: Context, query: String, speak: (String) -> Unit) {
+        val term = query.ifBlank { "" }
+        if (term.isBlank()) {
+            speak("What song should I play on JioSaavn?")
+            return
+        }
+        openApp(context, "jiosaavn", speak)
+        WhatsAppAccessibilityService.runTask(
+            steps = listOf(
+                AutomationStep.Wait(1200),
+                AutomationStep.ClickText("Search"),
+                AutomationStep.Wait(400),
+                AutomationStep.TypeText(term),
+                AutomationStep.Wait(1200),
+                AutomationStep.ClickText(term, exactMatch = false)
+            ),
+            onUpdate = { speak(it) },
+            onDone = { speak("Playing $term.") }
+        )
+        speak("Searching JioSaavn for $term.")
+    }
+
+    private fun parseSwipeDirection(target: String): SwipeDirection? {
 
     private fun parseSwipeDirection(target: String): SwipeDirection? {
         return when {
