@@ -38,14 +38,29 @@ object CommandProcessor {
         "domino's" to "com.Dominos"
     )
 
-    fun process(context: Context, rawText: String, scope: CoroutineScope, speak: (String) -> Unit) {
+    fun process(context: Context, rawText: String, scope: CoroutineScope, rawSpeak: (String) -> Unit) {
         val text = rawText.trim().lowercase()
         val detectedIntent = IntentDetector.detect(text)
+
+        // Every response gets logged to persistent memory alongside what
+        // triggered it. Named differently from the parameter (not `val speak =
+        // speak`) to avoid Kotlin's self-shadowing recursion trap - every
+        // `speak(...)` used below this line resolves to this wrapped version.
+        val speak: (String) -> Unit = { response ->
+            MemoryStore.record(context, rawText, response)
+            rawSpeak(response)
+        }
 
         val whatsappRegex = Regex("(?:message|whatsapp)\\s+(.+?)\\s+(?:on whatsapp\\s+)?saying\\s+(.+)")
         val whatsappMatch = whatsappRegex.find(text)
 
         when {
+            // Memory
+            detectedIntent.type == IntentType.CLEAR_MEMORY -> {
+                MemoryStore.clear(context)
+                speak("Done - I've forgotten everything up to now.")
+            }
+
             // Section 5: chained commands - "open zomato then search burger then add to cart"
             detectedIntent.type == IntentType.MULTI_STEP -> {
                 runChain(context, detectedIntent.target, scope, speak)
@@ -68,6 +83,9 @@ object CommandProcessor {
                         onDone = { speak("Added ${detectedIntent.target}.") }
                     )
                 }
+            }
+            detectedIntent.type == IntentType.SMART_CLICK -> {
+                resolveSmartClick(detectedIntent.target, scope, speak)
             }
             detectedIntent.type == IntentType.YOUTUBE_SEARCH -> {
                 runYoutubeSearchFlow(context, detectedIntent.target, speak)
@@ -225,10 +243,39 @@ object CommandProcessor {
                 speak("Let me think...")
                 scope.launch {
                     val answer = withContext(Dispatchers.IO) {
-                        GroqApiClient.ask(rawText)
+                        GroqApiClient.ask(context, rawText)
                     }
                     speak(answer)
                 }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Section 4-lite: "smart click" - resolve ordinals/pronouns against
+    // whatever's actually on screen right now, via the AI classifier.
+    // ------------------------------------------------------------------
+    private fun resolveSmartClick(phrase: String, scope: CoroutineScope, speak: (String) -> Unit) {
+        scope.launch {
+            val elements = WhatsAppAccessibilityService.snapshotScreen()
+            if (elements.isEmpty()) {
+                speak("I can't see anything tappable right now.")
+                return@launch
+            }
+
+            val listText = elements.joinToString("\n") { "${it.index}. ${it.label}" }
+            val prompt = "On-screen tappable elements:\n$listText\n\n" +
+                "User said: \"$phrase\"\n\n" +
+                "Which numbered element matches best?"
+
+            val reply = withContext(Dispatchers.IO) { GroqApiClient.classify(prompt) }
+            val chosenIndex = Regex("\\d+").find(reply)?.value?.toIntOrNull()
+            val chosen = elements.firstOrNull { it.index == chosenIndex }
+
+            if (chosen != null) {
+                WhatsAppAccessibilityService.runTask(listOf(AutomationStep.TapAt(chosen.x, chosen.y)), onUpdate = {})
+            } else {
+                speak("I couldn't find that on screen.")
             }
         }
     }
