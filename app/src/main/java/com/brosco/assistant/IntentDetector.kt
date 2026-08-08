@@ -225,7 +225,7 @@ object IntentDetector {
         if (input.contains("youtube")) {
             if (input.contains("pause")) return DetectedIntent(IntentType.YOUTUBE_PAUSE)
             if (input.contains("next")) return DetectedIntent(IntentType.YOUTUBE_NEXT)
-            val query = input.replace("youtube", "").replace(Regex("play|search|find|video|videos|on"), "").trim()
+            val query = input.replace("youtube", "").replace(Regex("play|search|find|video|videos|on|open"), "").trim()
             if (query.isNotBlank()) return DetectedIntent(IntentType.YOUTUBE_SEARCH, query)
         }
 
@@ -237,7 +237,7 @@ object IntentDetector {
         if (input.contains("spotify")) {
             if (input.contains("pause")) return DetectedIntent(IntentType.SPOTIFY_PAUSE)
             if (input.contains("next") || input.contains("skip")) return DetectedIntent(IntentType.SPOTIFY_NEXT)
-            val query = input.replace("spotify", "").replace(Regex("play|search|find|song|on"), "").trim()
+            val query = input.replace("spotify", "").replace(Regex("play|search|find|song|on|open"), "").trim()
             if (query.isNotBlank()) return DetectedIntent(IntentType.SPOTIFY_SEARCH, query)
         }
 
@@ -250,7 +250,7 @@ object IntentDetector {
             if (input.contains("pause")) return DetectedIntent(IntentType.JIOSAAVN_PAUSE)
             if (input.contains("next") || input.contains("skip")) return DetectedIntent(IntentType.JIOSAAVN_NEXT)
             val query = input.replace(Regex("jiosaavn|saavn"), "")
-                .replace(Regex("play|search|find|song|on"), "").trim()
+                .replace(Regex("play|search|find|song|on|open"), "").trim()
             if (query.isNotBlank()) return DetectedIntent(IntentType.JIOSAAVN_SEARCH, query)
         }
 
