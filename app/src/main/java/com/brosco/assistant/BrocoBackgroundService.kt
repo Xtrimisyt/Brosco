@@ -36,6 +36,15 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
     private var consecutiveErrors = 0
     private var cyclesSinceRecreate = 0
 
+    // Every recognizer session briefly grabs exclusive audio focus, which
+    // pauses whatever's playing (YouTube, Spotify...). While actively talking
+    // to Brosco we stay tight for responsiveness/barge-in; once you go quiet,
+    // we back off more and more so media gets real uninterrupted stretches.
+    private var idleCyclesWithNoSpeech = 0
+    private val idleBaseDelayMs = 1800L
+    private val idleMaxDelayMs = 6000L
+    private val idleBackoffStepMs = 500L
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val wakeGreetings = listOf(
@@ -49,6 +58,17 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
     // matching all of them fixes "I have to say it twice" without touching
     // the recognizer itself.
     private val wakeVariants = listOf("brosco", "brasco", "bosco", "brusco", "broscoe", "rosco")
+
+    // Exact-match only (not "contains") - "sleep" is a common word in normal
+    // speech/TV/music, so a loose match here would shut Brosco off by
+    // accident constantly. This only fires when the whole heard phrase IS
+    // one of these, whether said alone or right after the wake word.
+    private val sleepPhrases = setOf(
+        "sleep", "go to sleep", "goodnight", "good night",
+        "shut down", "power down", "turn yourself off", "stop listening"
+    )
+
+    private fun isSleepCommand(text: String): Boolean = sleepPhrases.contains(text.trim().lowercase())
 
     override fun onCreate() {
         super.onCreate()
@@ -93,7 +113,10 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
                 val heard = matches?.firstOrNull()?.trim()
 
                 if (!heard.isNullOrEmpty()) {
+                    idleCyclesWithNoSpeech = 0
                     handleHeard(heard)
+                } else {
+                    idleCyclesWithNoSpeech++
                 }
 
                 restart()
@@ -101,6 +124,7 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
 
             override fun onError(error: Int) {
                 consecutiveErrors++
+                idleCyclesWithNoSpeech++
                 Log.w("Brosco", "Recognizer error $error, consecutive=$consecutiveErrors")
                 restart()
             }
@@ -126,7 +150,6 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
     private fun restart() {
 
         if (!isRunning) return
-        if (isSpeaking) return
 
         cyclesSinceRecreate++
 
@@ -135,11 +158,15 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
         // same instance is reused for too many cycles in a row, especially with
         // no foreground Activity. Periodically tear it down and build a fresh one.
         val needsRecreate = consecutiveErrors >= 3 || cyclesSinceRecreate >= 20
-        val delayMs = if (consecutiveErrors >= 3) 2000L else 300L
+        val delayMs = when {
+            consecutiveErrors >= 3 -> 2000L
+            isSpeaking || expectingCommand -> 300L
+            else -> (idleBaseDelayMs + idleCyclesWithNoSpeech * idleBackoffStepMs).coerceAtMost(idleMaxDelayMs)
+        }
 
         mainHandler.postDelayed({
 
-            if (!isRunning || isSpeaking) return@postDelayed
+            if (!isRunning) return@postDelayed
 
             if (needsRecreate) {
                 try {
@@ -176,15 +203,27 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
     private fun handleHeard(heard: String) {
 
         val lower = heard.lowercase()
+        val matchedWake = wakeVariants.firstOrNull { lower.contains(it) }
+
+        // Brosco is currently talking. Only a fresh "Brosco" cuts him off -
+        // anything else heard mid-sentence is almost certainly his own voice
+        // bouncing back through the mic, not a real interruption.
+        if (isSpeaking && !expectingCommand) {
+            if (matchedWake == null) return
+            tts?.stop()
+            isSpeaking = false
+        }
 
         if (expectingCommand) {
 
             expectingCommand = false
+            if (isSleepCommand(heard)) {
+                goToSleep()
+                return
+            }
             runCommand(heard)
             return
         }
-
-        val matchedWake = wakeVariants.firstOrNull { lower.contains(it) }
 
         if (matchedWake != null) {
 
@@ -192,6 +231,10 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
 
             if (afterWake.isNotEmpty()) {
 
+                if (isSleepCommand(afterWake)) {
+                    goToSleep()
+                    return
+                }
                 runCommand(afterWake)
 
             } else {
@@ -206,7 +249,20 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
 
                 }, 8000)
             }
+        } else if (isSleepCommand(lower)) {
+            // Bare "sleep" with no wake word - deliberate and low-risk (worst
+            // case you just have to reopen the app), so no wake word required.
+            goToSleep()
         }
+    }
+
+    /** Shuts the background listener down entirely - only a wake word or reopening the app brings it back. */
+    private fun goToSleep() {
+        isRunning = false
+        speak("Going to sleep. Reopen the app or restart background listening when you need me.")
+        mainHandler.postDelayed({
+            stopSelf()
+        }, 2200)
     }
 
     private fun runCommand(text: String) {
