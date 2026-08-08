@@ -445,8 +445,6 @@ object CommandProcessor {
     }
 
     private fun parseSwipeDirection(target: String): SwipeDirection? {
-
-    private fun parseSwipeDirection(target: String): SwipeDirection? {
         return when {
             target.contains("up") -> SwipeDirection.UP
             target.contains("down") -> SwipeDirection.DOWN
