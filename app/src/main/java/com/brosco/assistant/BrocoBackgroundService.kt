@@ -33,13 +33,24 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
 
     private var expectingCommand = false
     private var isSpeaking = false
+    private var isGreeting = false
     private var consecutiveErrors = 0
     private var cyclesSinceRecreate = 0
 
+    // "Call mode": after ANY reply finishes (not just the wake greeting),
+    // Brosco opens a follow-up window where you can keep talking without
+    // saying "Brosco" again - like an ongoing call, not a fresh request each
+    // time. Generation counter avoids a stale timer from an earlier reply
+    // closing a NEWER window early.
+    private var followUpGeneration = 0
+    private val followUpWindowMs = 10000L
+
     // Every recognizer session briefly grabs exclusive audio focus, which
-    // pauses whatever's playing (YouTube, Spotify...). While actively talking
-    // to Brosco we stay tight for responsiveness/barge-in; once you go quiet,
-    // we back off more and more so media gets real uninterrupted stretches.
+    // pauses whatever's playing (YouTube, Spotify...). Being reliably heard
+    // matters more than avoiding that, so gaps stay short even when idle -
+    // this trades away some media-pause relief for actually hearing "Brosco"
+    // consistently. A previous version backed off up to 6s, which meant most
+    // wake-word attempts landed in a dead gap - fixed by capping much lower.
     private var idleCyclesWithNoSpeech = 0
     private val idleBaseDelayMs = 400L
     private val idleMaxDelayMs = 1200L
@@ -151,6 +162,13 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
 
         if (!isRunning) return
 
+        // Don't open the mic again while the wake greeting ("Yes, Shrey?") is
+        // still playing - that risks catching its own tail end as your
+        // "command", which silently ate the follow-up window before you'd
+        // even spoken. Wait for it to actually finish (onDone below already
+        // calls restart() again right when it does).
+        if (isSpeaking && isGreeting) return
+
         cyclesSinceRecreate++
 
         // Android's on-device recognizer tends to wedge itself (stops firing
@@ -240,6 +258,7 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
             } else {
 
                 speak(wakeGreetings.random())
+                isGreeting = true
 
                 expectingCommand = true
 
@@ -277,6 +296,22 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
+    /**
+     * Call-mode: opens a window (right as speech genuinely finishes, so
+     * there's no echo risk) where the next thing heard is treated as a
+     * command even without saying "Brosco" again. Uses a generation counter
+     * so an older reply's timer can't prematurely close a window opened by
+     * a newer one.
+     */
+    private fun armFollowUpWindow() {
+        expectingCommand = true
+        followUpGeneration++
+        val myGeneration = followUpGeneration
+        mainHandler.postDelayed({
+            if (followUpGeneration == myGeneration) expectingCommand = false
+        }, followUpWindowMs)
+    }
+
     private fun speak(text: String) {
 
         isSpeaking = true
@@ -289,12 +324,16 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
             override fun onDone(utteranceId: String?) {
 
                 isSpeaking = false
+                isGreeting = false
+                armFollowUpWindow()
                 restart()
             }
 
             override fun onError(utteranceId: String?) {
 
                 isSpeaking = false
+                isGreeting = false
+                armFollowUpWindow()
                 restart()
             }
         })
