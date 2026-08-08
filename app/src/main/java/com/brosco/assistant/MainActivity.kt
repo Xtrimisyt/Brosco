@@ -35,6 +35,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var micButton: Button
     private lateinit var pulseRing1: View
     private lateinit var pulseRing2: View
+    private lateinit var galaxyBackground: GalaxyBackgroundView
     private var ringAnimSet: android.animation.AnimatorSet? = null
     private lateinit var textInput: EditText
     private lateinit var sendTextButton: Button
@@ -65,6 +66,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tts = TextToSpeech(this, this)
 
         statusText.post { applyTitleGradient() }
+
+        galaxyBackground = findViewById(R.id.galaxyBackground)
+        galaxyBackground.start()
 
         ensurePermissions()
         updateBackgroundButtonLabel()
@@ -101,7 +105,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     override fun onResume() {
         super.onResume()
+        galaxyBackground.start()
         updateBackgroundButtonLabel()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        galaxyBackground.stop()
     }
 
     private fun updateBackgroundButtonLabel() {
