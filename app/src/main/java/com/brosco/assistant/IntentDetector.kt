@@ -37,6 +37,13 @@ enum class IntentType {
     // Section 5: chained commands, e.g. "open zomato then search burger then add to cart"
     MULTI_STEP,
 
+    // Section 4-lite: AI-resolved clicks for ordinals/pronouns ("the first
+    // video", "the add button next to that")
+    SMART_CLICK,
+
+    // Memory
+    CLEAR_MEMORY,
+
     UNKNOWN
 }
 
@@ -64,8 +71,29 @@ object IntentDetector {
             }
         }
 
+        // MEMORY WIPE
+        if (input.contains("forget everything") || input.contains("forget our conversation") ||
+            input.contains("clear your memory") || input.contains("clear memory") ||
+            input.contains("wipe your memory")
+        ) {
+            return DetectedIntent(IntentType.CLEAR_MEMORY)
+        }
+
         // ---- Section 3: named app-automation flows ----
         detectAppFlow(input)?.let { return it }
+
+        // SMART CLICK ("click the first video", "add the one next to this",
+        // "tap that") - plain text matching can't resolve ordinals/pronouns,
+        // so this hands the screen + phrase to the AI resolver instead.
+        val referenceWords = listOf(
+            " this", " that", " it", " the one", "first ", "second ", "third ",
+            "last ", "next one", "top ", "bottom "
+        )
+        val actionVerbs = listOf("click ", "tap ", "press ", "add ", "select ", "choose ", "open ")
+        val matchedVerb = actionVerbs.firstOrNull { input.startsWith(it) }
+        if (matchedVerb != null && referenceWords.any { input.contains(it) }) {
+            return DetectedIntent(IntentType.SMART_CLICK, input.removePrefix(matchedVerb).trim())
+        }
 
         // ADD ITEM ("add margherita pizza", "add 2 medium fries") - clicks the
         // nearest "Add" button next to a matching label on screen.
