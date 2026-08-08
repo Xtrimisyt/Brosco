@@ -29,6 +29,9 @@ enum class IntentType {
     SPOTIFY_SEARCH,
     SPOTIFY_PAUSE,
     SPOTIFY_NEXT,
+    JIOSAAVN_SEARCH,
+    JIOSAAVN_PAUSE,
+    JIOSAAVN_NEXT,
     INSTAGRAM_SCROLL_FEED,
     INSTAGRAM_OPEN_REELS,
     INSTAGRAM_LIKE,
@@ -236,6 +239,19 @@ object IntentDetector {
             if (input.contains("next") || input.contains("skip")) return DetectedIntent(IntentType.SPOTIFY_NEXT)
             val query = input.replace("spotify", "").replace(Regex("play|search|find|song|on"), "").trim()
             if (query.isNotBlank()) return DetectedIntent(IntentType.SPOTIFY_SEARCH, query)
+        }
+
+        // --- JioSaavn ---
+        if (Regex("(play|search|find)\\s+(.+?)\\s+on\\s+(jiosaavn|saavn)").containsMatchIn(input)) {
+            val match = Regex("(play|search|find)\\s+(.+?)\\s+on\\s+(jiosaavn|saavn)").find(input)!!
+            return DetectedIntent(IntentType.JIOSAAVN_SEARCH, match.groupValues[2].trim())
+        }
+        if (input.contains("jiosaavn") || input.contains("saavn")) {
+            if (input.contains("pause")) return DetectedIntent(IntentType.JIOSAAVN_PAUSE)
+            if (input.contains("next") || input.contains("skip")) return DetectedIntent(IntentType.JIOSAAVN_NEXT)
+            val query = input.replace(Regex("jiosaavn|saavn"), "")
+                .replace(Regex("play|search|find|song|on"), "").trim()
+            if (query.isNotBlank()) return DetectedIntent(IntentType.JIOSAAVN_SEARCH, query)
         }
 
         // --- Instagram ---
