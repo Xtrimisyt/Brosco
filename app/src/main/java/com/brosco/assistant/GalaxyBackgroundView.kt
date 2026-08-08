@@ -14,34 +14,61 @@ import kotlin.random.Random
 
 /**
  * A slow-drifting "galaxy" backdrop: a few big soft-glow nebula blobs that
- * gently move around, plus a field of twinkling stars. Pure canvas drawing,
- * no image assets, cheap enough to run continuously behind the UI.
+ * gently move around, plus a field of twinkling stars.
+ *
+ * Pure Canvas drawing — no image assets required.
  */
 class GalaxyBackgroundView @JvmOverloads constructor(
-    context: Context, attrs: AttributeSet? = null
+    context: Context,
+    attrs: AttributeSet? = null
 ) : View(context, attrs) {
 
-    private data class Star(val x: Float, val y: Float, val radius: Float, val phase: Float, val speed: Float)
+    private data class Star(
+        val x: Float,
+        val y: Float,
+        val radius: Float,
+        val phase: Float,
+        val speed: Float
+    )
+
     private data class Blob(
-        val baseX: Float, val baseY: Float, val radius: Float,
-        val color: Int, val driftX: Float, val driftY: Float, val phase: Float
+        val baseX: Float,
+        val baseY: Float,
+        val radius: Float,
+        val color: Int,
+        val driftX: Float,
+        val driftY: Float,
+        val phase: Float
     )
 
     private val stars = mutableListOf<Star>()
     private val blobs = mutableListOf<Blob>()
 
-    private val starPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+    private val starPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+    }
+
     private val blobPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val basePaint = Paint().apply { color = Color.parseColor("#0B0B18") }
+
+    private val basePaint = Paint().apply {
+        color = Color.parseColor("#0B0B18")
+    }
 
     private var animator: ValueAnimator? = null
     private var t = 0f
 
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+    override fun onSizeChanged(
+        w: Int,
+        h: Int,
+        oldw: Int,
+        oldh: Int
+    ) {
         super.onSizeChanged(w, h, oldw, oldh)
+
         if (w == 0 || h == 0) return
 
         stars.clear()
+
         repeat(80) {
             stars.add(
                 Star(
@@ -55,21 +82,59 @@ class GalaxyBackgroundView @JvmOverloads constructor(
         }
 
         blobs.clear()
-        // Purple, blue and a big red/magenta nebula for color variety.
-        blobs.add(Blob(w * 0.22f, h * 0.18f, w * 0.55f, Color.parseColor("#7F5AF0"), 34f, 22f, 0f))
-        blobs.add(Blob(w * 0.82f, h * 0.32f, w * 0.5f, Color.parseColor("#2CB1FF"), -26f, 28f, 2.1f))
-        blobs.add(Blob(w * 0.5f, h * 0.88f, w * 0.65f, Color.parseColor("#E63368"), 22f, -32f, 4.2f))
+
+        // Purple nebula
+        blobs.add(
+            Blob(
+                baseX = w * 0.22f,
+                baseY = h * 0.18f,
+                radius = w * 0.55f,
+                color = Color.parseColor("#7F5AF0"),
+                driftX = 34f,
+                driftY = 22f,
+                phase = 0f
+            )
+        )
+
+        // Blue nebula
+        blobs.add(
+            Blob(
+                baseX = w * 0.82f,
+                baseY = h * 0.32f,
+                radius = w * 0.5f,
+                color = Color.parseColor("#2CB1FF"),
+                driftX = -26f,
+                driftY = 28f,
+                phase = 2.1f
+            )
+        )
+
+        // Red / magenta nebula
+        blobs.add(
+            Blob(
+                baseX = w * 0.5f,
+                baseY = h * 0.88f,
+                radius = w * 0.65f,
+                color = Color.parseColor("#E63368"),
+                driftX = 22f,
+                driftY = -32f,
+                phase = 4.2f
+            )
+        )
     }
 
     fun start() {
         if (animator?.isRunning == true) return
+
         animator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 16L
             repeatCount = ValueAnimator.INFINITE
+
             addUpdateListener {
                 t += 0.016f
                 invalidate()
             }
+
             start()
         }
     }
@@ -80,27 +145,87 @@ class GalaxyBackgroundView @JvmOverloads constructor(
     }
 
     override fun onDraw(canvas: Canvas) {
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), basePaint)
+        super.onDraw(canvas)
 
+        // Dark galaxy background
+        canvas.drawRect(
+            0f,
+            0f,
+            width.toFloat(),
+            height.toFloat(),
+            basePaint
+        )
+
+        // Draw nebula blobs
         for (b in blobs) {
-            val cx = b.baseX + sin(t * 0.3 + b.phase) * b.driftX
-            val cy = b.baseY + sin(t * 0.22 + b.phase + 1.5f) * b.driftY
+
+            // IMPORTANT:
+            // sin() returns Double, so convert the result to Float.
+            val cx = (
+                b.baseX +
+                    sin((t * 0.3f + b.phase).toDouble()).toFloat() * b.driftX
+                )
+
+            val cy = (
+                b.baseY +
+                    sin((t * 0.22f + b.phase + 1.5f).toDouble()).toFloat() * b.driftY
+                )
+
             blobPaint.shader = RadialGradient(
-                cx, cy, b.radius,
-                intArrayOf(colorWithAlpha(b.color, 95), colorWithAlpha(b.color, 0)),
-                null, Shader.TileMode.CLAMP
+                cx,
+                cy,
+                b.radius,
+                intArrayOf(
+                    colorWithAlpha(b.color, 95),
+                    colorWithAlpha(b.color, 0)
+                ),
+                null,
+                Shader.TileMode.CLAMP
             )
-            canvas.drawCircle(cx, cy, b.radius, blobPaint)
+
+            canvas.drawCircle(
+                cx,
+                cy,
+                b.radius,
+                blobPaint
+            )
         }
 
+        // Draw twinkling stars
         for (s in stars) {
-            val twinkle = (sin(t * s.speed + s.phase) + 1f) / 2f
-            starPaint.alpha = (60 + twinkle * 195).toInt().coerceIn(0, 255)
-            canvas.drawCircle(s.x, s.y, s.radius, starPaint)
+
+            val twinkle = (
+                sin((t * s.speed + s.phase).toDouble()).toFloat() + 1f
+            ) / 2f
+
+            starPaint.alpha = (
+                60f + twinkle * 195f
+            ).toInt().coerceIn(0, 255)
+
+            canvas.drawCircle(
+                s.x,
+                s.y,
+                s.radius,
+                starPaint
+            )
         }
     }
 
-    private fun colorWithAlpha(color: Int, alpha: Int): Int {
-        return Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
+    private fun colorWithAlpha(
+        color: Int,
+        alpha: Int
+    ): Int {
+        return Color.argb(
+            alpha,
+            Color.red(color),
+            Color.green(color),
+            Color.blue(color)
+        )
+    }
+
+    override fun onDetachedFromWindow() {
+        stop()
+        super.onDetachedFromWindow()
     }
 }
+
