@@ -41,9 +41,9 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
     // to Brosco we stay tight for responsiveness/barge-in; once you go quiet,
     // we back off more and more so media gets real uninterrupted stretches.
     private var idleCyclesWithNoSpeech = 0
-    private val idleBaseDelayMs = 1800L
-    private val idleMaxDelayMs = 6000L
-    private val idleBackoffStepMs = 500L
+    private val idleBaseDelayMs = 400L
+    private val idleMaxDelayMs = 1200L
+    private val idleBackoffStepMs = 150L
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
