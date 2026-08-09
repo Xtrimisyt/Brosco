@@ -126,9 +126,24 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun runCommand(text: String) {
-        CommandProcessor.process(this, text, CoroutineScope(Dispatchers.Main)) { response ->
+        galaxyBackground.setActive(true)
+        CommandProcessor.process(
+            context = this,
+            rawText = text,
+            scope = CoroutineScope(Dispatchers.Main),
+            onPlaybackStarted = {
+                runOnUiThread {
+                    // Once a song/video is actually playing, stop
+                    // always-listen so it doesn't keep grabbing audio focus
+                    // every recognition cycle and cutting the playback
+                    // right back off.
+                    if (alwaysListening) stopAlwaysListening()
+                }
+            }
+        ) { response ->
             runOnUiThread {
                 stopPulse()
+                galaxyBackground.setActive(alwaysListening)
                 statusText.text = if (alwaysListening) "Always listening..." else "Brosco"
                 speak(response)
             }
@@ -141,6 +156,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         alwaysListenButton.text = "Stop Always-Listen (app open)"
         statusText.text = "Always listening..."
         startPulse()
+        galaxyBackground.setActive(true)
 
         continuousRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
         continuousRecognizer?.setRecognitionListener(object : RecognitionListener {
@@ -178,6 +194,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         alwaysListenButton.text = "Enable Always-Listen (app open)"
         statusText.text = "Brosco"
         stopPulse()
+        galaxyBackground.setActive(false)
         continuousRecognizer?.destroy()
         continuousRecognizer = null
     }
@@ -305,6 +322,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private fun startListening() {
         statusText.text = "Listening..."
+        galaxyBackground.setActive(true)
+        startPulse()
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
         intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
         intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak a command...")
@@ -322,6 +341,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val results = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
             val heard = results?.get(0) ?: run {
                 statusText.text = "Brosco"
+                if (!alwaysListening) galaxyBackground.setActive(false)
                 return
             }
             statusText.text = "\"$heard\""
@@ -329,6 +349,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             runCommand(heard)
         } else {
             statusText.text = "Brosco"
+            if (!alwaysListening) galaxyBackground.setActive(false)
         }
     }
 
@@ -337,3 +358,4 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         continuousRecognizer?.destroy()
     }
 }
+
