@@ -276,20 +276,36 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
     }
 
     /** Shuts the background listener down entirely - only a wake word or reopening the app brings it back. */
-    private fun goToSleep() {
+    private fun goToSleep(announce: Boolean = true) {
         isRunning = false
-        speak("Going to sleep. Reopen the app or restart background listening when you need me.")
-        mainHandler.postDelayed({
-            stopSelf()
-        }, 2200)
+        if (announce) {
+            speak("Going to sleep. Reopen the app or restart background listening when you need me.")
+            mainHandler.postDelayed({ stopSelf() }, 2200)
+        } else {
+            // Silent variant (used right after starting playback) - no
+            // QUEUE_FLUSH announcement that would cut off whatever's
+            // already being spoken (e.g. "Playing <song>.").
+            mainHandler.postDelayed({ stopSelf() }, 1800)
+        }
     }
 
     private fun runCommand(text: String) {
 
         CommandProcessor.process(
-            this,
-            text,
-            CoroutineScope(Dispatchers.Main)
+            context = this,
+            rawText = text,
+            scope = CoroutineScope(Dispatchers.Main),
+            onPlaybackStarted = {
+                // Background listening repeatedly opens the mic, and every
+                // one of those sessions briefly steals audio focus - which
+                // pauses/cuts whatever just started playing right back off.
+                // "Turn itself off" once playback actually begins so the
+                // song/video isn't fighting the listener for audio focus.
+                // Say "Brosco" again (or reopen the app) to wake it back up.
+                // Delayed so "Playing <song>." finishes speaking first, and
+                // silent so it doesn't talk over the song once it starts.
+                mainHandler.postDelayed({ goToSleep(announce = false) }, 1500)
+            }
         ) { response ->
 
             speak(response)
