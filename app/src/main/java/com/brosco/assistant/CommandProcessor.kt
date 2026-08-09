@@ -60,6 +60,7 @@ object CommandProcessor {
             // Memory
             detectedIntent.type == IntentType.CLEAR_MEMORY -> {
                 MemoryStore.clear(context)
+                LearnedFacts.clear(context)
                 speak("Done - I've forgotten everything up to now.")
             }
 
@@ -259,6 +260,18 @@ object CommandProcessor {
                         GroqApiClient.ask(context, rawText)
                     }
                     speak(answer)
+
+                    // "Learning": pull out anything durable worth remembering
+                    // from this exchange, in the background, after the fact -
+                    // never blocks or delays the spoken reply itself.
+                    launch {
+                        val fact = withContext(Dispatchers.IO) {
+                            GroqApiClient.extractFact(rawText, answer)
+                        }
+                        if (!fact.equals("NONE", ignoreCase = true)) {
+                            LearnedFacts.add(context, fact)
+                        }
+                    }
                 }
             }
         }
