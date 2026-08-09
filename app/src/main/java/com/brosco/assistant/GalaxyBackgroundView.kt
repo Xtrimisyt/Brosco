@@ -71,15 +71,32 @@ class GalaxyBackgroundView @JvmOverloads constructor(
     private var t = 0f
 
     // "Listening/thinking" reactive mode - Brosco visibly comes alive: the
-    // nebula pulses brighter/faster and cyan-shifted, and stray shooting
+    // nebula pulses brighter/faster and color-shifted, and stray shooting
     // stars streak across occasionally. active01 eases toward the target
     // instead of snapping, so the transition itself feels animated.
-    private var active = false
+    //
+    // Two separate reactive states, each with its own tint, so "always
+    // listening" (cyan - normal assistant mode) and "background Brosco"
+    // (red - it's quietly live even while you're not looking at the app)
+    // read as visibly different modes rather than the same glow twice.
+    // Background wins if both happen to be on at once - it's the more
+    // "serious" state.
+    private var listening = false
+    private var backgroundOn = false
     private var active01 = 0f
     private var nextShootingStarAt = 0f
 
+    private val cyanTint = Color.parseColor("#00E5C7")
+    private val redTint = Color.parseColor("#FF3B5C")
+    private var currentTint = cyanTint
+
     fun setActive(isActive: Boolean) {
-        active = isActive
+        listening = isActive
+    }
+
+    /** Reflects BrocoBackgroundService.isRunning - the persistent, off-screen listener. */
+    fun setBackgroundActive(isActive: Boolean) {
+        backgroundOn = isActive
     }
 
     override fun onSizeChanged(
@@ -158,12 +175,21 @@ class GalaxyBackgroundView @JvmOverloads constructor(
             addUpdateListener {
                 t += 0.016f
 
+                val active = listening || backgroundOn
+
                 // Ease toward the target active state (~0.3s to settle)
                 // rather than snapping, so turning listening on/off reads
                 // as a deliberate animation, not a jump-cut.
                 val target = if (active) 1f else 0f
                 active01 += (target - active01) * 0.12f
                 if (kotlin.math.abs(target - active01) < 0.01f) active01 = target
+
+                // Ease the tint color too (not just its intensity), so
+                // switching between listening (cyan) and background (red)
+                // - or turning either on from idle - crossfades smoothly
+                // instead of the hue jump-cutting.
+                val targetTint = if (backgroundOn) redTint else cyanTint
+                currentTint = blendColors(currentTint, targetTint, 0.08f)
 
                 if (active && t >= nextShootingStarAt && width > 0 && height > 0) {
                     spawnShootingStar()
@@ -223,9 +249,18 @@ class GalaxyBackgroundView @JvmOverloads constructor(
         )
 
         // Active mode speeds up the drift and pushes brightness/color
-        // toward cyan - Brosco visibly "wakes up" while listening/thinking.
+        // toward whichever mode is on (cyan = listening, red = background)
+        // - Brosco visibly "wakes up", and which color tells you why.
         val speedMul = 1f + active01 * 0.8f
-        val cyan = Color.parseColor("#00E5C7")
+        val tint = currentTint
+
+        // Background mode gets an extra slow "heartbeat" pulse on top of
+        // the twinkle - a steady beat reads as more "quietly always-on"
+        // than the faster listening shimmer, and makes the two modes feel
+        // distinct at a glance, not just differently colored.
+        val heartbeat = if (backgroundOn) {
+            (sin((t * 2.2f).toDouble()).toFloat() + 1f) / 2f
+        } else 0f
 
         // Draw nebula blobs
         for (b in blobs) {
@@ -242,13 +277,13 @@ class GalaxyBackgroundView @JvmOverloads constructor(
                     sin((t * 0.22f * speedMul + b.phase + 1.5f).toDouble()).toFloat() * b.driftY
                 )
 
-            val blobColor = blendColors(b.color, cyan, active01 * 0.35f)
-            val alphaBoost = (95 + active01 * 55).toInt().coerceIn(0, 255)
+            val blobColor = blendColors(b.color, tint, active01 * 0.35f)
+            val alphaBoost = (95 + active01 * 55 + heartbeat * 30).toInt().coerceIn(0, 255)
 
             blobPaint.shader = RadialGradient(
                 cx,
                 cy,
-                b.radius * (1f + active01 * 0.08f),
+                b.radius * (1f + active01 * 0.08f + heartbeat * 0.02f),
                 intArrayOf(
                     colorWithAlpha(blobColor, alphaBoost),
                     colorWithAlpha(blobColor, 0)
@@ -260,7 +295,7 @@ class GalaxyBackgroundView @JvmOverloads constructor(
             canvas.drawCircle(
                 cx,
                 cy,
-                b.radius * (1f + active01 * 0.08f),
+                b.radius * (1f + active01 * 0.08f + heartbeat * 0.02f),
                 blobPaint
             )
         }
@@ -275,7 +310,7 @@ class GalaxyBackgroundView @JvmOverloads constructor(
             starPaint.alpha = (
                 60f + twinkle * (195f + active01 * 40f)
             ).toInt().coerceIn(0, 255)
-            starPaint.color = blendColors(Color.WHITE, cyan, active01 * 0.25f)
+            starPaint.color = blendColors(Color.WHITE, tint, active01 * 0.25f)
 
             canvas.drawCircle(
                 s.x,
@@ -289,10 +324,31 @@ class GalaxyBackgroundView @JvmOverloads constructor(
         // finish their streak even if active mode just switched off.
         for (s in shootingStars) {
             val fade = (s.life / s.maxLife).coerceIn(0f, 1f)
-            streakPaint.color = colorWithAlpha(cyan, (fade * 220).toInt())
+            streakPaint.color = colorWithAlpha(tint, (fade * 220).toInt())
             val tailX = s.x - s.vx * 2.4f
             val tailY = s.y - s.vy * 2.4f
             canvas.drawLine(s.x, s.y, tailX, tailY, streakPaint)
+        }
+
+        // Background mode: a soft red vignette breathing at the edges, on
+        // top of everything else - the unmistakable "I'm quietly still
+        // live" cue even from a glance at the corner of the screen.
+        if (backgroundOn && active01 > 0.01f) {
+            val vignetteAlpha = (heartbeat * 28 * active01).toInt().coerceIn(0, 60)
+            if (vignetteAlpha > 0) {
+                blobPaint.shader = RadialGradient(
+                    width / 2f,
+                    height / 2f,
+                    (width.coerceAtLeast(height)) * 0.75f,
+                    intArrayOf(
+                        colorWithAlpha(redTint, 0),
+                        colorWithAlpha(redTint, vignetteAlpha)
+                    ),
+                    floatArrayOf(0.6f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+                canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), blobPaint)
+            }
         }
     }
 
