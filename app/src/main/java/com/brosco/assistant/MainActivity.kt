@@ -94,18 +94,54 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         backgroundServiceButton.setOnClickListener {
             if (BrocoBackgroundService.isRunning) {
                 stopService(Intent(this, BrocoBackgroundService::class.java))
+                galaxyBackground.setBackgroundActive(false)
             } else {
                 ensurePermissions()
+                requestBatteryOptimizationExemption()
                 val intent = Intent(this, BrocoBackgroundService::class.java)
                 ContextCompat.startForegroundService(this, intent)
+                // Flip the animation the instant you tap, don't wait for
+                // the 500ms label-refresh poll below - it should feel
+                // immediate.
+                galaxyBackground.setBackgroundActive(true)
             }
             Handler(Looper.getMainLooper()).postDelayed({ updateBackgroundButtonLabel() }, 500)
+        }
+    }
+
+    /**
+     * Background Brosco holds the mic via a foreground service, but several
+     * OEMs (Xiaomi/Samsung/OnePlus/etc.) still aggressively kill
+     * foreground services once the screen's been off for a while unless
+     * the app is exempted from battery optimization. This is the one piece
+     * of that we can actually trigger from code - the rest (OEM-specific
+     * "autostart"/"no restrictions" toggles) has to be set manually per
+     * device and can't be requested programmatically.
+     */
+    private fun requestBatteryOptimizationExemption() {
+        val powerManager = getSystemService(android.os.PowerManager::class.java)
+        if (powerManager != null && !powerManager.isIgnoringBatteryOptimizations(packageName)) {
+            try {
+                val intent = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = android.net.Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+                Toast.makeText(
+                    this,
+                    "Allow Brosco to run unrestricted so background listening doesn't get killed.",
+                    Toast.LENGTH_LONG
+                ).show()
+            } catch (e: Exception) {
+                // Some OEM ROMs strip this action out entirely - nothing
+                // more to do from code if so.
+            }
         }
     }
 
     override fun onResume() {
         super.onResume()
         galaxyBackground.start()
+        galaxyBackground.setBackgroundActive(BrocoBackgroundService.isRunning)
         updateBackgroundButtonLabel()
     }
 
@@ -117,6 +153,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun updateBackgroundButtonLabel() {
         backgroundServiceButton.text = if (BrocoBackgroundService.isRunning)
             "Stop Background Brosco" else "Start Background Brosco"
+        galaxyBackground.setBackgroundActive(BrocoBackgroundService.isRunning)
     }
 
     override fun onInit(status: Int) {
@@ -358,4 +395,3 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         continuousRecognizer?.destroy()
     }
 }
-
