@@ -31,6 +31,31 @@ sealed class AutomationStep {
     /** Tap a raw screen coordinate directly (used by the AI-assisted "smart click" resolver). */
     data class TapAt(val x: Float, val y: Float) : AutomationStep()
 
+    /**
+     * Waits until the foreground window actually belongs to [packageName]
+     * before letting the rest of the flow proceed. Fixes the classic race
+     * condition where a fixed `Wait(ms)` isn't long enough for a cold app
+     * launch, so the next step (tapping "Search") fires while we're still
+     * looking at the launcher or Brosco's own window and finds nothing.
+     * Best-effort: if the package never matches, the normal per-step
+     * timeout in the ticker still kicks in and the flow moves on rather
+     * than hanging forever.
+     */
+    data class WaitForPackage(val packageName: String) : AutomationStep()
+
+    /**
+     * After a search, taps the first real result in the list rather than
+     * the exact text that was typed. Matching the typed query verbatim
+     * against on-screen text is unreliable (a video/song title is rarely
+     * identical to the search phrase, and the still-visible search
+     * suggestion that echoes the query gets tapped instead of an actual
+     * result). This instead scans top-to-bottom/left-to-right, skips the
+     * search bar/header area (roughly the top [minYFraction] of the
+     * screen), skips anything whose label matches [excludeText] (the
+     * suggestion row), and taps the first plausible result left over.
+     */
+    data class ClickFirstResult(val excludeText: String = "", val minYFraction: Float = 0.14f) : AutomationStep()
+
     /** Swipe across the screen in a direction. */
     data class Swipe(val direction: SwipeDirection) : AutomationStep()
 
