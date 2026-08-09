@@ -70,6 +70,55 @@ object GroqApiClient {
         }
     }
 
+    /**
+     * "Learning": after a real conversation exchange, this checks whether
+     * anything durable worth remembering long-term came up (a preference, a
+     * routine, an ongoing situation) - not logged from every trivial command,
+     * just genuine conversation. Returns "NONE" when there's nothing worth
+     * keeping, which the caller should not persist.
+     */
+    fun extractFact(userText: String, assistantText: String): String {
+        val body = JSONObject().apply {
+            put("model", "llama-3.3-70b-versatile")
+            put("max_tokens", 40)
+            put("temperature", 0)
+            put("messages", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "system")
+                    put("content", "You extract durable facts about a user from one exchange with their " +
+                        "assistant, for long-term memory. A durable fact is a preference, routine, " +
+                        "relationship, ongoing situation, or similar detail worth remembering weeks from " +
+                        "now - NOT small talk, NOT one-off requests, NOT anything already generic. " +
+                        "Reply with ONE short third-person sentence (e.g. 'Prefers Spotify over other " +
+                        "music apps.'). If nothing durable came up, reply exactly NONE.")
+                })
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", "User said: \"$userText\"\nAssistant replied: \"$assistantText\"")
+                })
+            })
+        }
+
+        val request = Request.Builder()
+            .url(URL)
+            .addHeader("Authorization", "Bearer $API_KEY")
+            .addHeader("content-type", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        return try {
+            client.newCall(request).execute().use { response ->
+                val json = JSONObject(response.body?.string() ?: "{}")
+                val choices = json.optJSONArray("choices") ?: return "NONE"
+                if (choices.length() == 0) return "NONE"
+                val message = choices.getJSONObject(0).optJSONObject("message")
+                message?.optString("content")?.trim() ?: "NONE"
+            }
+        } catch (e: Exception) {
+            "NONE"
+        }
+    }
+
     fun ask(context: Context, query: String): String {
         val lower = query.lowercase()
         val needsSearch = newsKeywords.any { lower.contains(it) }
@@ -77,6 +126,9 @@ object GroqApiClient {
         val model = if (needsSearch) "groq/compound" else "llama-3.3-70b-versatile"
 
         val history = MemoryStore.recentHistory(context, maxTurns = 12)
+        val facts = LearnedFacts.all(context)
+        val factsBlock = if (facts.isEmpty()) "" else
+            "\n\nWhat you've learned about Shrey over time:\n" + facts.joinToString("\n") { "- $it" }
 
         val body = JSONObject().apply {
             put("model", model)
@@ -94,7 +146,8 @@ object GroqApiClient {
                         "for continuity when it's actually relevant, but don't force references to old " +
                         "topics if the current question doesn't need them. " +
                         "Answer in 1-3 short spoken sentences. No markdown, no lists, no asterisks - " +
-                        "just plain spoken language, since this is read aloud by text-to-speech.")
+                        "just plain spoken language, since this is read aloud by text-to-speech." +
+                        factsBlock)
                 })
                 history.forEach { turn ->
                     put(JSONObject().apply {
