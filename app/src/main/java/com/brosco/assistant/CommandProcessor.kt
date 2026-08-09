@@ -40,7 +40,21 @@ object CommandProcessor {
         "domino's" to "com.Dominos"
     )
 
-    fun process(context: Context, rawText: String, scope: CoroutineScope, rawSpeak: (String) -> Unit) {
+    // Remembers which food-ordering app/flow we last drove and when, so a
+    // follow-up "add X" right after "order Y on dominos" adds a second item
+    // to the same order (search -> select -> add to cart again) instead of
+    // blindly poking around whatever happens to be on screen right now.
+    private var lastOrderApp: String? = null
+    private var lastOrderAt: Long = 0L
+    private val ORDER_CONTEXT_WINDOW_MS = 3 * 60 * 1000L
+
+    fun process(
+        context: Context,
+        rawText: String,
+        scope: CoroutineScope,
+        onPlaybackStarted: () -> Unit = {},
+        rawSpeak: (String) -> Unit
+    ) {
         val text = rawText.trim().lowercase()
         val detectedIntent = IntentDetector.detect(text)
 
@@ -66,7 +80,7 @@ object CommandProcessor {
 
             // Section 5: chained commands - "open zomato then search burger then add to cart"
             detectedIntent.type == IntentType.MULTI_STEP -> {
-                runChain(context, detectedIntent.target, scope, speak)
+                runChain(context, detectedIntent.target, scope, onPlaybackStarted, speak)
             }
 
             // Section 3: app-automation flows
@@ -80,18 +94,31 @@ object CommandProcessor {
                 if (detectedIntent.target.isBlank()) {
                     speak("Add what?")
                 } else {
-                    WhatsAppAccessibilityService.runTask(
-                        listOf(AutomationStep.AddItemNear(detectedIntent.target)),
-                        onUpdate = { speak(it) },
-                        onDone = { speak("Added ${detectedIntent.target}.") }
-                    )
+                    val recentOrderApp = lastOrderApp?.takeIf {
+                        System.currentTimeMillis() - lastOrderAt < ORDER_CONTEXT_WINDOW_MS
+                    }
+                    when (recentOrderApp) {
+                        // Mid-order follow-up: "order paneer pizza on dominos"
+                        // then "add farmhouse pizza" - runs the same
+                        // search -> select -> add-to-cart flow for the new
+                        // item instead of hunting for that label on whatever
+                        // screen happens to be showing (which is usually the
+                        // cart from the first item, where it won't exist).
+                        "dominos" -> runDominosFlow(context, detectedIntent.target, speak, alreadyOpen = true)
+                        "zomato" -> runZomatoFlow(context, detectedIntent.target, speak, alreadyOpen = true)
+                        else -> WhatsAppAccessibilityService.runTask(
+                            listOf(AutomationStep.AddItemNear(detectedIntent.target)),
+                            onUpdate = { speak(it) },
+                            onDone = { speak("Added ${detectedIntent.target}.") }
+                        )
+                    }
                 }
             }
             detectedIntent.type == IntentType.SMART_CLICK -> {
                 resolveSmartClick(detectedIntent.target, scope, speak)
             }
             detectedIntent.type == IntentType.YOUTUBE_SEARCH -> {
-                runYoutubeSearchFlow(context, detectedIntent.target, speak)
+                runYoutubeSearchFlow(context, detectedIntent.target, speak, onPlaybackStarted)
             }
             detectedIntent.type == IntentType.YOUTUBE_PAUSE -> {
                 WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ClickText("pause video")), onUpdate = {})
@@ -102,7 +129,7 @@ object CommandProcessor {
                 speak("Next video.")
             }
             detectedIntent.type == IntentType.SPOTIFY_SEARCH -> {
-                runSpotifySearchFlow(context, detectedIntent.target, speak)
+                runSpotifySearchFlow(context, detectedIntent.target, speak, onPlaybackStarted)
             }
             detectedIntent.type == IntentType.SPOTIFY_PAUSE -> {
                 WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ClickText("pause")), onUpdate = {})
@@ -113,7 +140,7 @@ object CommandProcessor {
                 speak("Skipping.")
             }
             detectedIntent.type == IntentType.JIOSAAVN_SEARCH -> {
-                runJioSaavnSearchFlow(context, detectedIntent.target, speak)
+                runJioSaavnSearchFlow(context, detectedIntent.target, speak, onPlaybackStarted)
             }
             detectedIntent.type == IntentType.JIOSAAVN_PAUSE -> {
                 WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ClickText("pause")), onUpdate = {})
@@ -309,7 +336,13 @@ object CommandProcessor {
     // ------------------------------------------------------------------
     // Section 5: Planning - chained multi-step voice commands
     // ------------------------------------------------------------------
-    private fun runChain(context: Context, chained: String, scope: CoroutineScope, speak: (String) -> Unit) {
+    private fun runChain(
+        context: Context,
+        chained: String,
+        scope: CoroutineScope,
+        onPlaybackStarted: () -> Unit,
+        speak: (String) -> Unit
+    ) {
         val pieces = chained
             .split(Regex(" then | and then | -> | after that | followed by "))
             .map { it.trim() }
@@ -324,33 +357,69 @@ object CommandProcessor {
 
         scope.launch {
             for ((index, piece) in pieces.withIndex()) {
-                process(context, piece, this, speak)
-                if (index < pieces.lastIndex) delay(2000)
+                process(context, piece, this, onPlaybackStarted, speak)
+                if (index < pieces.lastIndex) {
+                    // Wait for THIS step's automation queue to actually
+                    // finish before starting the next one - a fixed delay
+                    // isn't enough for a multi-tap flow like "order X on
+                    // dominos", and runTask() replaces the queue on every
+                    // call, so firing the next piece too early silently
+                    // cancels whatever the previous piece hadn't gotten to
+                    // yet (that was the bug behind "add" never landing).
+                    awaitAutomationIdle()
+                    delay(700)
+                }
             }
+        }
+    }
+
+    /** Polls the accessibility service's task queue until it drains (or we give up waiting). */
+    private suspend fun awaitAutomationIdle(maxWaitMs: Long = 20000L) {
+        val start = System.currentTimeMillis()
+        // Give a step a moment to actually get queued before checking -
+        // process() for the first piece may still be a few lines from
+        // calling runTask() when we get here.
+        delay(300)
+        while (WhatsAppAccessibilityService.isTaskRunning() && System.currentTimeMillis() - start < maxWaitMs) {
+            delay(250)
         }
     }
 
     // ------------------------------------------------------------------
     // Section 3: Zomato - search food -> select restaurant -> add to cart -> open cart
     // ------------------------------------------------------------------
-    private fun runZomatoFlow(context: Context, food: String, speak: (String) -> Unit) {
+    private fun runZomatoFlow(context: Context, food: String, speak: (String) -> Unit, alreadyOpen: Boolean = false) {
         val query = food.ifBlank { "food" }
-        openApp(context, "zomato", speak)
+        lastOrderApp = "zomato"
+        lastOrderAt = System.currentTimeMillis()
+
+        val steps = mutableListOf<AutomationStep>()
+        if (alreadyOpen) {
+            // Coming back from a previous item's cart screen - back out to
+            // the menu/search screen before searching for the next one.
+            steps += AutomationStep.GoBack
+            steps += AutomationStep.Wait(600)
+        } else {
+            openApp(context, "zomato", speak)
+            steps += AutomationStep.WaitForPackage("com.application.zomato")
+            steps += AutomationStep.Wait(800)
+        }
+        steps += listOf(
+            AutomationStep.ClickText("Search"),
+            AutomationStep.Wait(500),
+            AutomationStep.TypeText(query),
+            AutomationStep.Wait(1600),
+            AutomationStep.ClickFirstResult(excludeText = query),
+            AutomationStep.Wait(1600),
+            AutomationStep.ClickText("Add"),
+            AutomationStep.Wait(700),
+            AutomationStep.ClickText("View Cart")
+        )
+
         WhatsAppAccessibilityService.runTask(
-            steps = listOf(
-                AutomationStep.Wait(1400),
-                AutomationStep.ClickText("Search"),
-                AutomationStep.Wait(400),
-                AutomationStep.TypeText(query),
-                AutomationStep.Wait(1400),
-                AutomationStep.ClickText(query, exactMatch = false),
-                AutomationStep.Wait(1400),
-                AutomationStep.ClickText("Add"),
-                AutomationStep.Wait(600),
-                AutomationStep.ClickText("View Cart")
-            ),
+            steps = steps,
             onUpdate = { speak(it) },
-            onDone = { speak("Your cart should be open - take a look and confirm the order.") }
+            onDone = { speak("$query is in your cart - take a look and confirm the order.") }
         )
         speak("Searching for $query on Zomato.")
     }
@@ -358,26 +427,42 @@ object CommandProcessor {
     // ------------------------------------------------------------------
     // Section 3: Domino's - search pizza -> choose size -> add to cart -> open cart
     // ------------------------------------------------------------------
-    private fun runDominosFlow(context: Context, pizza: String, speak: (String) -> Unit) {
+    private fun runDominosFlow(context: Context, pizza: String, speak: (String) -> Unit, alreadyOpen: Boolean = false) {
         val query = pizza.ifBlank { "pizza" }
-        openApp(context, "dominos", speak)
+        lastOrderApp = "dominos"
+        lastOrderAt = System.currentTimeMillis()
+
+        val steps = mutableListOf<AutomationStep>()
+        if (alreadyOpen) {
+            // We're most likely sitting on the cart screen from the item
+            // just added - back out to the menu before searching again so
+            // "then add X" lands a second item instead of hunting for it
+            // on the cart screen where it can't possibly be.
+            steps += AutomationStep.GoBack
+            steps += AutomationStep.Wait(600)
+        } else {
+            openApp(context, "dominos", speak)
+            steps += AutomationStep.WaitForPackage("com.Dominos")
+            steps += AutomationStep.Wait(800)
+        }
+        steps += listOf(
+            AutomationStep.ClickText("Search"),
+            AutomationStep.Wait(500),
+            AutomationStep.TypeText(query),
+            AutomationStep.Wait(1600),
+            AutomationStep.ClickFirstResult(excludeText = query),
+            AutomationStep.Wait(1400),
+            AutomationStep.ClickText("Medium"),
+            AutomationStep.Wait(700),
+            AutomationStep.ClickText("Add"),
+            AutomationStep.Wait(700),
+            AutomationStep.ClickText("Cart")
+        )
+
         WhatsAppAccessibilityService.runTask(
-            steps = listOf(
-                AutomationStep.Wait(1400),
-                AutomationStep.ClickText("Search"),
-                AutomationStep.Wait(400),
-                AutomationStep.TypeText(query),
-                AutomationStep.Wait(1400),
-                AutomationStep.ClickText(query, exactMatch = false),
-                AutomationStep.Wait(1200),
-                AutomationStep.ClickText("Medium"),
-                AutomationStep.Wait(600),
-                AutomationStep.ClickText("Add"),
-                AutomationStep.Wait(600),
-                AutomationStep.ClickText("Cart")
-            ),
+            steps = steps,
             onUpdate = { speak(it) },
-            onDone = { speak("Cart's open - the size I picked was medium, change it if you'd like something else.") }
+            onDone = { speak("$query is in the cart - medium size, change it there if you want something else.") }
         )
         speak("Looking for $query on Domino's.")
     }
@@ -385,7 +470,12 @@ object CommandProcessor {
     // ------------------------------------------------------------------
     // Section 3: YouTube - search -> play first result
     // ------------------------------------------------------------------
-    private fun runYoutubeSearchFlow(context: Context, query: String, speak: (String) -> Unit) {
+    private fun runYoutubeSearchFlow(
+        context: Context,
+        query: String,
+        speak: (String) -> Unit,
+        onPlaybackStarted: () -> Unit = {}
+    ) {
         val term = query.ifBlank { "" }
         if (term.isBlank()) {
             speak("What should I search on YouTube?")
@@ -394,15 +484,28 @@ object CommandProcessor {
         openApp(context, "youtube", speak)
         WhatsAppAccessibilityService.runTask(
             steps = listOf(
-                AutomationStep.Wait(1200),
+                AutomationStep.WaitForPackage("com.google.android.youtube"),
+                AutomationStep.Wait(700),
                 AutomationStep.ClickText("Search"),
-                AutomationStep.Wait(400),
+                AutomationStep.Wait(500),
+                // TypeText already submits via IME "search"/enter, so by the
+                // time this wait elapses we should be on the results screen,
+                // not still showing search suggestions.
                 AutomationStep.TypeText(term),
-                AutomationStep.Wait(1200),
-                AutomationStep.ClickText(term, exactMatch = false)
+                AutomationStep.Wait(2000),
+                // Tap the first actual result thumbnail/row rather than
+                // matching the typed text - a video's title is almost never
+                // identical to the search phrase, so the old exact-ish text
+                // match usually found nothing (or re-tapped the search
+                // suggestion echoing the query) and the flow silently
+                // stalled without ever pressing play.
+                AutomationStep.ClickFirstResult(excludeText = term, minYFraction = 0.16f)
             ),
             onUpdate = { speak(it) },
-            onDone = { speak("Playing $term.") }
+            onDone = {
+                speak("Playing $term.")
+                onPlaybackStarted()
+            }
         )
         speak("Searching YouTube for $term.")
     }
@@ -410,7 +513,12 @@ object CommandProcessor {
     // ------------------------------------------------------------------
     // Section 3: Spotify - search -> play
     // ------------------------------------------------------------------
-    private fun runSpotifySearchFlow(context: Context, query: String, speak: (String) -> Unit) {
+    private fun runSpotifySearchFlow(
+        context: Context,
+        query: String,
+        speak: (String) -> Unit,
+        onPlaybackStarted: () -> Unit = {}
+    ) {
         val term = query.ifBlank { "" }
         if (term.isBlank()) {
             speak("What song should I play?")
@@ -419,15 +527,19 @@ object CommandProcessor {
         openApp(context, "spotify", speak)
         WhatsAppAccessibilityService.runTask(
             steps = listOf(
-                AutomationStep.Wait(1200),
+                AutomationStep.WaitForPackage("com.spotify.music"),
+                AutomationStep.Wait(700),
                 AutomationStep.ClickText("Search"),
-                AutomationStep.Wait(400),
+                AutomationStep.Wait(500),
                 AutomationStep.TypeText(term),
-                AutomationStep.Wait(1200),
-                AutomationStep.ClickText(term, exactMatch = false)
+                AutomationStep.Wait(1800),
+                AutomationStep.ClickFirstResult(excludeText = term)
             ),
             onUpdate = { speak(it) },
-            onDone = { speak("Playing $term.") }
+            onDone = {
+                speak("Playing $term.")
+                onPlaybackStarted()
+            }
         )
         speak("Searching Spotify for $term.")
     }
@@ -435,7 +547,12 @@ object CommandProcessor {
     // ------------------------------------------------------------------
     // Section 3: JioSaavn - search -> play (same pattern as Spotify)
     // ------------------------------------------------------------------
-    private fun runJioSaavnSearchFlow(context: Context, query: String, speak: (String) -> Unit) {
+    private fun runJioSaavnSearchFlow(
+        context: Context,
+        query: String,
+        speak: (String) -> Unit,
+        onPlaybackStarted: () -> Unit = {}
+    ) {
         val term = query.ifBlank { "" }
         if (term.isBlank()) {
             speak("What song should I play on JioSaavn?")
@@ -444,15 +561,29 @@ object CommandProcessor {
         openApp(context, "jiosaavn", speak)
         WhatsAppAccessibilityService.runTask(
             steps = listOf(
-                AutomationStep.Wait(1200),
+                // Cold-launching JioSaavn can take longer than a fixed Wait
+                // covers, which was the main reason "Search" never got
+                // tapped and the whole flow quietly did nothing - wait for
+                // its window to actually be the foreground one first.
+                AutomationStep.WaitForPackage("com.jio.media.jiobeats"),
+                AutomationStep.Wait(700),
                 AutomationStep.ClickText("Search"),
-                AutomationStep.Wait(400),
+                AutomationStep.Wait(500),
                 AutomationStep.TypeText(term),
-                AutomationStep.Wait(1200),
-                AutomationStep.ClickText(term, exactMatch = false)
+                AutomationStep.Wait(1800),
+                AutomationStep.ClickFirstResult(excludeText = term)
             ),
             onUpdate = { speak(it) },
-            onDone = { speak("Playing $term.") }
+            onDone = {
+                speak("Playing $term.")
+                // "Turn itself off" once the song is actually playing -
+                // both always-listen (foreground) and background Brosco
+                // repeatedly grab audio focus every listening cycle, which
+                // was pausing/cutting the song right back off after it
+                // started. Stopping the listener once playback begins is
+                // what lets it actually keep playing.
+                onPlaybackStarted()
+            }
         )
         speak("Searching JioSaavn for $term.")
     }
