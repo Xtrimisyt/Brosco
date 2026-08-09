@@ -73,7 +73,18 @@ class WhatsAppAccessibilityService : AccessibilityService() {
          * AI to resolve ordinals ("the first video") and vague references
          * ("that", "the one next to it") that plain text matching can't handle.
          */
-        fun snapshotScreen(): List<ScreenElement> = instance?.captureScreenSnapshot() ?: emptyList()
+        fun snapshotScreen(): List<ScreenElement> =
+            try {
+                instance?.captureScreenSnapshot() ?: emptyList()
+            } catch (e: Exception) {
+                // A node can go stale mid-walk if the window changes under us;
+                // never let that escape as an uncaught exception on whatever
+                // thread called this (a coroutine crash here can take the
+                // whole app process down, which is what the OS then reports
+                // as the accessibility service "malfunctioning").
+                Log.e("Brosco", "snapshotScreen failed: ${e.message}")
+                emptyList()
+            }
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -179,6 +190,12 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             is AutomationStep.TapAt -> {
                 success = dispatchTap(step.x, step.y, holdMs = 60)
             }
+            is AutomationStep.WaitForPackage -> {
+                success = root?.packageName?.toString() == step.packageName
+            }
+            is AutomationStep.ClickFirstResult -> {
+                success = root != null && clickFirstResult(root, step.excludeText, step.minYFraction)
+            }
             is AutomationStep.Swipe -> {
                 success = performSwipe(step.direction)
             }
@@ -254,6 +271,42 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             collectClickables(node.getChild(i), depth + 1, out)
         }
+    }
+
+    // ------------------------------------------------------------------
+    // First real result after a search - see AutomationStep.ClickFirstResult
+    // for why this exists instead of matching the typed query verbatim.
+    // ------------------------------------------------------------------
+    private fun clickFirstResult(root: AccessibilityNodeInfo, excludeText: String, minYFraction: Float): Boolean {
+        visitBudget = maxVisits
+        val raw = mutableListOf<ScreenElement>()
+        collectClickables(root, depth = 0, raw)
+        if (raw.isEmpty()) return false
+
+        val screenHeight = resources.displayMetrics.heightPixels.toFloat()
+        val cutoff = screenHeight * minYFraction
+        val needle = excludeText.trim()
+
+        val candidates = raw
+            .sortedWith(compareBy({ it.y }, { it.x }))
+            .filter { it.y >= cutoff }
+            .filter { !(needle.isNotBlank() && it.label.equals(needle, ignoreCase = true)) }
+
+        // Fall back to the excluded/near-top elements rather than doing
+        // nothing if filtering left us with no candidates at all - a
+        // slightly-wrong tap beats a flow that silently stalls.
+        val chosen = candidates.firstOrNull()
+            ?: raw.sortedWith(compareBy({ it.y }, { it.x })).firstOrNull { it.y >= cutoff }
+            ?: raw.firstOrNull()
+            ?: return false
+
+        visitBudget = maxVisits
+        val node = findByPredicate(root, depth = 0) {
+            val bounds = Rect()
+            it.getBoundsInScreen(bounds)
+            !bounds.isEmpty && bounds.centerX().toFloat() == chosen.x && bounds.centerY().toFloat() == chosen.y
+        }
+        return if (node != null) clickNodeOrAncestor(node) else dispatchTap(chosen.x, chosen.y, holdMs = 60)
     }
 
     // ------------------------------------------------------------------
