@@ -562,3 +562,4 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         return dispatchGesture(gesture, null, null)
     }
 }
+
