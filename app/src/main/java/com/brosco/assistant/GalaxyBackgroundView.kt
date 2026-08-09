@@ -41,21 +41,46 @@ class GalaxyBackgroundView @JvmOverloads constructor(
         val phase: Float
     )
 
+    private data class ShootingStar(
+        var x: Float,
+        var y: Float,
+        val vx: Float,
+        val vy: Float,
+        var life: Float,
+        val maxLife: Float
+    )
+
     private val stars = mutableListOf<Star>()
     private val blobs = mutableListOf<Blob>()
+    private val shootingStars = mutableListOf<ShootingStar>()
 
     private val starPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
     }
 
     private val blobPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-
+    private val streakPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        strokeWidth = 3f
+        strokeCap = Paint.Cap.ROUND
+    }
     private val basePaint = Paint().apply {
         color = Color.parseColor("#0B0B18")
     }
 
     private var animator: ValueAnimator? = null
     private var t = 0f
+
+    // "Listening/thinking" reactive mode - Brosco visibly comes alive: the
+    // nebula pulses brighter/faster and cyan-shifted, and stray shooting
+    // stars streak across occasionally. active01 eases toward the target
+    // instead of snapping, so the transition itself feels animated.
+    private var active = false
+    private var active01 = 0f
+    private var nextShootingStarAt = 0f
+
+    fun setActive(isActive: Boolean) {
+        active = isActive
+    }
 
     override fun onSizeChanged(
         w: Int,
@@ -132,6 +157,28 @@ class GalaxyBackgroundView @JvmOverloads constructor(
 
             addUpdateListener {
                 t += 0.016f
+
+                // Ease toward the target active state (~0.3s to settle)
+                // rather than snapping, so turning listening on/off reads
+                // as a deliberate animation, not a jump-cut.
+                val target = if (active) 1f else 0f
+                active01 += (target - active01) * 0.12f
+                if (kotlin.math.abs(target - active01) < 0.01f) active01 = target
+
+                if (active && t >= nextShootingStarAt && width > 0 && height > 0) {
+                    spawnShootingStar()
+                    nextShootingStarAt = t + 0.9f + Random.nextFloat() * 1.6f
+                }
+
+                val iterator = shootingStars.iterator()
+                while (iterator.hasNext()) {
+                    val s = iterator.next()
+                    s.x += s.vx
+                    s.y += s.vy
+                    s.life -= 0.016f
+                    if (s.life <= 0f) iterator.remove()
+                }
+
                 invalidate()
             }
 
@@ -142,6 +189,25 @@ class GalaxyBackgroundView @JvmOverloads constructor(
     fun stop() {
         animator?.cancel()
         animator = null
+    }
+
+    private fun spawnShootingStar() {
+        val fromLeft = Random.nextBoolean()
+        val startY = Random.nextFloat() * height * 0.5f
+        val startX = if (fromLeft) -40f else width + 40f
+        val speed = width * (0.9f + Random.nextFloat() * 0.5f) / 40f
+        val angle = Math.toRadians((25 + Random.nextFloat() * 20).toDouble())
+        val dir = if (fromLeft) 1f else -1f
+        shootingStars.add(
+            ShootingStar(
+                x = startX,
+                y = startY,
+                vx = dir * speed * kotlin.math.cos(angle).toFloat(),
+                vy = speed * kotlin.math.sin(angle).toFloat(),
+                life = 0.7f,
+                maxLife = 0.7f
+            )
+        )
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -156,6 +222,11 @@ class GalaxyBackgroundView @JvmOverloads constructor(
             basePaint
         )
 
+        // Active mode speeds up the drift and pushes brightness/color
+        // toward cyan - Brosco visibly "wakes up" while listening/thinking.
+        val speedMul = 1f + active01 * 0.8f
+        val cyan = Color.parseColor("#00E5C7")
+
         // Draw nebula blobs
         for (b in blobs) {
 
@@ -163,21 +234,24 @@ class GalaxyBackgroundView @JvmOverloads constructor(
             // sin() returns Double, so convert the result to Float.
             val cx = (
                 b.baseX +
-                    sin((t * 0.3f + b.phase).toDouble()).toFloat() * b.driftX
+                    sin((t * 0.3f * speedMul + b.phase).toDouble()).toFloat() * b.driftX
                 )
 
             val cy = (
                 b.baseY +
-                    sin((t * 0.22f + b.phase + 1.5f).toDouble()).toFloat() * b.driftY
+                    sin((t * 0.22f * speedMul + b.phase + 1.5f).toDouble()).toFloat() * b.driftY
                 )
+
+            val blobColor = blendColors(b.color, cyan, active01 * 0.35f)
+            val alphaBoost = (95 + active01 * 55).toInt().coerceIn(0, 255)
 
             blobPaint.shader = RadialGradient(
                 cx,
                 cy,
-                b.radius,
+                b.radius * (1f + active01 * 0.08f),
                 intArrayOf(
-                    colorWithAlpha(b.color, 95),
-                    colorWithAlpha(b.color, 0)
+                    colorWithAlpha(blobColor, alphaBoost),
+                    colorWithAlpha(blobColor, 0)
                 ),
                 null,
                 Shader.TileMode.CLAMP
@@ -186,29 +260,48 @@ class GalaxyBackgroundView @JvmOverloads constructor(
             canvas.drawCircle(
                 cx,
                 cy,
-                b.radius,
+                b.radius * (1f + active01 * 0.08f),
                 blobPaint
             )
         }
 
-        // Draw twinkling stars
+        // Draw twinkling stars - twinkle faster and brighter while active
         for (s in stars) {
 
             val twinkle = (
-                sin((t * s.speed + s.phase).toDouble()).toFloat() + 1f
+                sin((t * s.speed * speedMul + s.phase).toDouble()).toFloat() + 1f
             ) / 2f
 
             starPaint.alpha = (
-                60f + twinkle * 195f
+                60f + twinkle * (195f + active01 * 40f)
             ).toInt().coerceIn(0, 255)
+            starPaint.color = blendColors(Color.WHITE, cyan, active01 * 0.25f)
 
             canvas.drawCircle(
                 s.x,
                 s.y,
-                s.radius,
+                s.radius * (1f + active01 * 0.15f),
                 starPaint
             )
         }
+
+        // Shooting stars - only spawn while active, but let in-flight ones
+        // finish their streak even if active mode just switched off.
+        for (s in shootingStars) {
+            val fade = (s.life / s.maxLife).coerceIn(0f, 1f)
+            streakPaint.color = colorWithAlpha(cyan, (fade * 220).toInt())
+            val tailX = s.x - s.vx * 2.4f
+            val tailY = s.y - s.vy * 2.4f
+            canvas.drawLine(s.x, s.y, tailX, tailY, streakPaint)
+        }
+    }
+
+    private fun blendColors(from: Int, to: Int, ratio: Float): Int {
+        val r = ratio.coerceIn(0f, 1f)
+        val red = (Color.red(from) + (Color.red(to) - Color.red(from)) * r).toInt()
+        val green = (Color.green(from) + (Color.green(to) - Color.green(from)) * r).toInt()
+        val blue = (Color.blue(from) + (Color.blue(to) - Color.blue(from)) * r).toInt()
+        return Color.rgb(red, green, blue)
     }
 
     private fun colorWithAlpha(
