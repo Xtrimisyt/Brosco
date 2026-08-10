@@ -114,30 +114,46 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
 
         recognizer?.setRecognitionListener(object : RecognitionListener {
 
+            // This service runs continuously in the background, so any
+            // uncaught exception here kills the whole app process - and
+            // since the accessibility service lives in that same process,
+            // that's exactly what makes Android disable it and show "this
+            // service is malfunctioning" until it's manually toggled back on.
+            // Every callback below is wrapped so a bad reply, a storage
+            // hiccup, or anything unexpected degrades gracefully instead.
+
             override fun onResults(results: Bundle?) {
+                try {
+                    consecutiveErrors = 0
 
-                consecutiveErrors = 0
+                    val matches =
+                        results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
 
-                val matches =
-                    results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val heard = matches?.firstOrNull()?.trim()
 
-                val heard = matches?.firstOrNull()?.trim()
-
-                if (!heard.isNullOrEmpty()) {
-                    idleCyclesWithNoSpeech = 0
-                    handleHeard(heard)
-                } else {
-                    idleCyclesWithNoSpeech++
+                    if (!heard.isNullOrEmpty()) {
+                        idleCyclesWithNoSpeech = 0
+                        handleHeard(heard)
+                    } else {
+                        idleCyclesWithNoSpeech++
+                    }
+                } catch (e: Exception) {
+                    Log.e("Brosco", "onResults crashed: ${e.message}", e)
+                } finally {
+                    restart()
                 }
-
-                restart()
             }
 
             override fun onError(error: Int) {
-                consecutiveErrors++
-                idleCyclesWithNoSpeech++
-                Log.w("Brosco", "Recognizer error $error, consecutive=$consecutiveErrors")
-                restart()
+                try {
+                    consecutiveErrors++
+                    idleCyclesWithNoSpeech++
+                    Log.w("Brosco", "Recognizer error $error, consecutive=$consecutiveErrors")
+                } catch (e: Exception) {
+                    Log.e("Brosco", "onError handler crashed: ${e.message}", e)
+                } finally {
+                    restart()
+                }
             }
 
             override fun onReadyForSpeech(params: Bundle?) {}
@@ -159,6 +175,14 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun restart() {
+        try {
+            restartInternal()
+        } catch (e: Exception) {
+            Log.e("Brosco", "restart() crashed: ${e.message}", e)
+        }
+    }
+
+    private fun restartInternal() {
 
         if (!isRunning) return
 
@@ -183,42 +207,52 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
         }
 
         mainHandler.postDelayed({
-
-            if (!isRunning) return@postDelayed
-
-            if (needsRecreate) {
-                try {
-                    recognizer?.destroy()
-                } catch (_: Exception) {
-                }
-                consecutiveErrors = 0
-                cyclesSinceRecreate = 0
-                startListeningLoop()
-                return@postDelayed
-            }
-
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(
-                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-                )
-                putExtra(
-                    RecognizerIntent.EXTRA_CALLING_PACKAGE,
-                    packageName
-                )
-            }
-
             try {
-                recognizer?.cancel()
-                recognizer?.startListening(intent)
-            } catch (_: Exception) {
-                consecutiveErrors++
-            }
+                if (!isRunning) return@postDelayed
 
+                if (needsRecreate) {
+                    try {
+                        recognizer?.destroy()
+                    } catch (_: Exception) {
+                    }
+                    consecutiveErrors = 0
+                    cyclesSinceRecreate = 0
+                    startListeningLoop()
+                    return@postDelayed
+                }
+
+                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(
+                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                    )
+                    putExtra(
+                        RecognizerIntent.EXTRA_CALLING_PACKAGE,
+                        packageName
+                    )
+                }
+
+                try {
+                    recognizer?.cancel()
+                    recognizer?.startListening(intent)
+                } catch (_: Exception) {
+                    consecutiveErrors++
+                }
+            } catch (e: Exception) {
+                Log.e("Brosco", "Delayed restart step crashed: ${e.message}", e)
+            }
         }, delayMs)
     }
 
     private fun handleHeard(heard: String) {
+        try {
+            handleHeardInternal(heard)
+        } catch (e: Exception) {
+            Log.e("Brosco", "handleHeard crashed on \"$heard\": ${e.message}", e)
+        }
+    }
+
+    private fun handleHeardInternal(heard: String) {
 
         val lower = heard.lowercase()
         val matchedWake = wakeVariants.firstOrNull { lower.contains(it) }
@@ -338,19 +372,27 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
             override fun onStart(utteranceId: String?) {}
 
             override fun onDone(utteranceId: String?) {
-
-                isSpeaking = false
-                isGreeting = false
-                armFollowUpWindow()
-                restart()
+                try {
+                    isSpeaking = false
+                    isGreeting = false
+                    armFollowUpWindow()
+                } catch (e: Exception) {
+                    Log.e("Brosco", "onDone crashed: ${e.message}", e)
+                } finally {
+                    restart()
+                }
             }
 
             override fun onError(utteranceId: String?) {
-
-                isSpeaking = false
-                isGreeting = false
-                armFollowUpWindow()
-                restart()
+                try {
+                    isSpeaking = false
+                    isGreeting = false
+                    armFollowUpWindow()
+                } catch (e: Exception) {
+                    Log.e("Brosco", "TTS onError handler crashed: ${e.message}", e)
+                } finally {
+                    restart()
+                }
             }
         })
 
