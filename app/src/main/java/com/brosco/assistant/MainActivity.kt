@@ -5,6 +5,7 @@ import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Shader
 import android.os.Bundle
@@ -14,10 +15,14 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.util.Log
+import android.view.Gravity
 import android.view.View
 import android.view.animation.LinearInterpolator
 import android.widget.Button
 import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -31,7 +36,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private lateinit var tts: TextToSpeech
     private lateinit var statusText: TextView
-    private lateinit var responseText: TextView
     private lateinit var micButton: Button
     private lateinit var pulseRing1: View
     private lateinit var pulseRing2: View
@@ -42,6 +46,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var alwaysListenButton: Button
     private lateinit var backgroundServiceButton: Button
     private var pulseAnimator: ObjectAnimator? = null
+
+    // Claude-style chat transcript: chatScroll holds chatContainer, and
+    // every user/assistant turn becomes a bubble row appended to it.
+    private lateinit var chatScroll: ScrollView
+    private lateinit var chatContainer: LinearLayout
+    private lateinit var emptyStateText: TextView
 
     private var continuousRecognizer: SpeechRecognizer? = null
     private var alwaysListening = false
@@ -55,7 +65,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         setContentView(R.layout.activity_main)
 
         statusText = findViewById(R.id.statusText)
-        responseText = findViewById(R.id.responseText)
         micButton = findViewById(R.id.micButton)
         pulseRing1 = findViewById(R.id.pulseRing1)
         pulseRing2 = findViewById(R.id.pulseRing2)
@@ -63,6 +72,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         sendTextButton = findViewById(R.id.sendTextButton)
         alwaysListenButton = findViewById(R.id.alwaysListenButton)
         backgroundServiceButton = findViewById(R.id.backgroundServiceButton)
+        chatScroll = findViewById(R.id.chatScroll)
+        chatContainer = findViewById(R.id.chatContainer)
+        emptyStateText = findViewById(R.id.emptyStateText)
         tts = TextToSpeech(this, this)
 
         statusText.post { applyTitleGradient() }
@@ -74,38 +86,60 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         updateBackgroundButtonLabel()
 
         micButton.setOnClickListener {
-            ensurePermissions()
-            startListening()
+            safely {
+                ensurePermissions()
+                startListening()
+            }
         }
 
         sendTextButton.setOnClickListener {
-            val text = textInput.text.toString().trim()
-            if (text.isNotEmpty()) {
-                statusText.text = "\"$text\""
-                runCommand(text)
-                textInput.setText("")
+            safely {
+                val text = textInput.text.toString().trim()
+                if (text.isNotEmpty()) {
+                    addUserMessage(text)
+                    runCommand(text)
+                    textInput.setText("")
+                }
             }
         }
 
         alwaysListenButton.setOnClickListener {
-            if (alwaysListening) stopAlwaysListening() else startAlwaysListening()
+            safely {
+                if (alwaysListening) stopAlwaysListening() else startAlwaysListening()
+            }
         }
 
         backgroundServiceButton.setOnClickListener {
-            if (BrocoBackgroundService.isRunning) {
-                stopService(Intent(this, BrocoBackgroundService::class.java))
-                galaxyBackground.setBackgroundActive(false)
-            } else {
-                ensurePermissions()
-                requestBatteryOptimizationExemption()
-                val intent = Intent(this, BrocoBackgroundService::class.java)
-                ContextCompat.startForegroundService(this, intent)
-                // Flip the animation the instant you tap, don't wait for
-                // the 500ms label-refresh poll below - it should feel
-                // immediate.
-                galaxyBackground.setBackgroundActive(true)
+            safely {
+                if (BrocoBackgroundService.isRunning) {
+                    stopService(Intent(this, BrocoBackgroundService::class.java))
+                    galaxyBackground.setBackgroundActive(false)
+                } else {
+                    ensurePermissions()
+                    requestBatteryOptimizationExemption()
+                    val intent = Intent(this, BrocoBackgroundService::class.java)
+                    ContextCompat.startForegroundService(this, intent)
+                    // Flip the animation the instant you tap, don't wait for
+                    // the 500ms label-refresh poll below - it should feel
+                    // immediate.
+                    galaxyBackground.setBackgroundActive(true)
+                }
+                Handler(Looper.getMainLooper()).postDelayed({ safely { updateBackgroundButtonLabel() } }, 500)
             }
-            Handler(Looper.getMainLooper()).postDelayed({ updateBackgroundButtonLabel() }, 500)
+        }
+    }
+
+    /**
+     * Runs a UI action and swallows anything unexpected instead of letting it
+     * crash the whole process. A crash here would take the accessibility
+     * service down with it (same process), which is what forces a manual
+     * disable/re-enable toggle in Settings to get Brosco working again.
+     */
+    private inline fun safely(action: () -> Unit) {
+        try {
+            action()
+        } catch (e: Exception) {
+            Log.e("Brosco", "UI action crashed: ${e.message}", e)
         }
     }
 
@@ -152,7 +186,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private fun updateBackgroundButtonLabel() {
         backgroundServiceButton.text = if (BrocoBackgroundService.isRunning)
-            "Stop Background Brosco" else "Start Background Brosco"
+            "STOP BACKGROUND BROSCO" else "BACKGROUND BROSCO"
         galaxyBackground.setBackgroundActive(BrocoBackgroundService.isRunning)
     }
 
@@ -170,19 +204,23 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             scope = CoroutineScope(Dispatchers.Main),
             onPlaybackStarted = {
                 runOnUiThread {
-                    // Once a song/video is actually playing, stop
-                    // always-listen so it doesn't keep grabbing audio focus
-                    // every recognition cycle and cutting the playback
-                    // right back off.
-                    if (alwaysListening) stopAlwaysListening()
+                    safely {
+                        // Once a song/video is actually playing, stop
+                        // always-listen so it doesn't keep grabbing audio focus
+                        // every recognition cycle and cutting the playback
+                        // right back off.
+                        if (alwaysListening) stopAlwaysListening()
+                    }
                 }
             }
         ) { response ->
             runOnUiThread {
-                stopPulse()
-                galaxyBackground.setActive(alwaysListening)
-                statusText.text = if (alwaysListening) "Always listening..." else "Brosco"
-                speak(response)
+                safely {
+                    stopPulse()
+                    galaxyBackground.setActive(alwaysListening)
+                    statusText.text = if (alwaysListening) "Always listening..." else "Brosco"
+                    speak(response)
+                }
             }
         }
     }
@@ -190,7 +228,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun startAlwaysListening() {
         ensurePermissions()
         alwaysListening = true
-        alwaysListenButton.text = "Stop Always-Listen (app open)"
+        alwaysListenButton.text = "STOP ALWAYS-LISTEN"
         statusText.text = "Always listening..."
         startPulse()
         galaxyBackground.setActive(true)
@@ -198,13 +236,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         continuousRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
         continuousRecognizer?.setRecognitionListener(object : RecognitionListener {
             override fun onResults(results: Bundle?) {
-                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                val heard = matches?.get(0)?.trim()
-                if (!heard.isNullOrEmpty()) handleWakeAndCommand(heard)
-                if (alwaysListening) restartContinuousListening()
+                safely {
+                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val heard = matches?.get(0)?.trim()
+                    if (!heard.isNullOrEmpty()) handleWakeAndCommand(heard)
+                    if (alwaysListening) restartContinuousListening()
+                }
             }
             override fun onError(error: Int) {
-                if (alwaysListening) restartContinuousListening()
+                safely { if (alwaysListening) restartContinuousListening() }
             }
             override fun onReadyForSpeech(params: Bundle?) {}
             override fun onBeginningOfSpeech() {}
@@ -222,13 +262,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
         intent.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
         Handler(Looper.getMainLooper()).postDelayed({
-            if (alwaysListening) continuousRecognizer?.startListening(intent)
+            safely { if (alwaysListening) continuousRecognizer?.startListening(intent) }
         }, 300)
     }
 
     private fun stopAlwaysListening() {
         alwaysListening = false
-        alwaysListenButton.text = "Enable Always-Listen (app open)"
+        alwaysListenButton.text = "ALWAYS-LISTEN"
         statusText.text = "Brosco"
         stopPulse()
         galaxyBackground.setActive(false)
@@ -240,14 +280,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val lower = heard.lowercase()
         if (expectingCommand) {
             expectingCommand = false
-            statusText.text = "\"$heard\""
+            addUserMessage(heard)
             runCommand(heard)
             return
         }
         if (lower.contains("brosco")) {
             val afterWake = lower.substringAfter("brosco").trim()
             if (afterWake.isNotEmpty()) {
-                statusText.text = "\"$heard\""
+                addUserMessage(heard)
                 runCommand(afterWake)
             } else {
                 speak("Yes Shrey sir?")
@@ -262,9 +302,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val shader = LinearGradient(
             0f, 0f, width, 0f,
             intArrayOf(
-                android.graphics.Color.parseColor("#7F5AF0"),
-                android.graphics.Color.parseColor("#2CB1FF"),
-                android.graphics.Color.parseColor("#00E5C7")
+                Color.parseColor("#7F5AF0"),
+                Color.parseColor("#2CB1FF"),
+                Color.parseColor("#00E5C7")
             ),
             null,
             Shader.TileMode.CLAMP
@@ -332,8 +372,74 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun speak(text: String) {
-        responseText.text = text
-        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
+        addAssistantMessage(text)
+        // Strip the handful of markdown characters the model might still
+        // slip in, purely so TTS doesn't read out literal asterisks/hashes -
+        // the chat bubble above still shows the full original text.
+        val ttsText = text.replace(Regex("[*_#`]"), "")
+        tts.speak(ttsText, TextToSpeech.QUEUE_FLUSH, null, null)
+    }
+
+    // ------------------------------------------------------------------
+    // Claude-style chat transcript
+    // ------------------------------------------------------------------
+    private fun addUserMessage(text: String) {
+        hideEmptyState()
+        chatContainer.addView(buildBubbleRow(text, isUser = true))
+        scrollToBottom()
+    }
+
+    private fun addAssistantMessage(text: String) {
+        hideEmptyState()
+        chatContainer.addView(buildBubbleRow(text, isUser = false))
+        scrollToBottom()
+    }
+
+    private fun hideEmptyState() {
+        if (emptyStateText.visibility != View.GONE) emptyStateText.visibility = View.GONE
+    }
+
+    private fun buildBubbleRow(text: String, isUser: Boolean): LinearLayout {
+        val bubble = TextView(this).apply {
+            this.text = text
+            setTextColor(if (isUser) Color.WHITE else Color.parseColor("#E8E5F7"))
+            textSize = 15.5f
+            setBackgroundResource(if (isUser) R.drawable.bubble_user else R.drawable.bubble_assistant)
+            setPadding(dp(14), dp(11), dp(14), dp(11))
+            setLineSpacing(dp(2).toFloat(), 1f)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.86f)
+        }
+
+        val spacer = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(0, 1, 0.14f)
+        }
+
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(5)
+                bottomMargin = dp(5)
+            }
+            gravity = if (isUser) Gravity.END else Gravity.START
+            if (isUser) {
+                addView(spacer)
+                addView(bubble)
+            } else {
+                addView(bubble)
+                addView(spacer)
+            }
+        }
+    }
+
+    private fun scrollToBottom() {
+        chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun dp(value: Int): Int {
+        val density = resources.displayMetrics.density
+        return (value * density).toInt()
     }
 
     private fun ensurePermissions() {
@@ -374,19 +480,21 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == SPEECH_REQUEST_CODE && data != null) {
-            val results = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-            val heard = results?.get(0) ?: run {
+        safely {
+            if (requestCode == SPEECH_REQUEST_CODE && data != null) {
+                val results = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                val heard = results?.get(0) ?: run {
+                    statusText.text = "Brosco"
+                    if (!alwaysListening) galaxyBackground.setActive(false)
+                    return@safely
+                }
+                addUserMessage(heard)
+                startPulse()
+                runCommand(heard)
+            } else {
                 statusText.text = "Brosco"
                 if (!alwaysListening) galaxyBackground.setActive(false)
-                return
             }
-            statusText.text = "\"$heard\""
-            startPulse()
-            runCommand(heard)
-        } else {
-            statusText.text = "Brosco"
-            if (!alwaysListening) galaxyBackground.setActive(false)
         }
     }
 
