@@ -5,6 +5,7 @@ import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
 import android.provider.ContactsContract
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -13,6 +14,24 @@ import kotlinx.coroutines.withContext
 import java.net.URLEncoder
 
 object CommandProcessor {
+
+    /**
+     * Wraps a coroutine body so an unexpected exception inside it is logged
+     * and swallowed instead of propagating to the default uncaught-exception
+     * handler. A crash anywhere in the app kills the whole process - and
+     * since the accessibility service lives in that same process, that's
+     * exactly what makes Android disable it and show "this service is
+     * malfunctioning" until it's manually toggled back on. Every coroutine
+     * CommandProcessor launches goes through this.
+     */
+    private fun CoroutineScope.safeLaunch(block: suspend CoroutineScope.() -> Unit) =
+        this.launch {
+            try {
+                block()
+            } catch (e: Exception) {
+                Log.e("Brosco", "Background task failed: ${e.message}", e)
+            }
+        }
 
     private val appPackages = mapOf(
         "whatsapp" to "com.whatsapp",
@@ -49,6 +68,31 @@ object CommandProcessor {
     private val ORDER_CONTEXT_WINDOW_MS = 3 * 60 * 1000L
 
     fun process(
+        context: Context,
+        rawText: String,
+        scope: CoroutineScope,
+        onPlaybackStarted: () -> Unit = {},
+        rawSpeak: (String) -> Unit
+    ) {
+        // Top-level safety net: everything below this can throw in ways we
+        // haven't anticipated (a malformed contact lookup, a null from some
+        // OEM's accessibility tree, etc). Catching here means one bad command
+        // degrades to a spoken apology instead of crashing the whole process
+        // - which is what was silently disabling the accessibility service
+        // and forcing a manual re-toggle every time something went wrong.
+        try {
+            processInternal(context, rawText, scope, onPlaybackStarted, rawSpeak)
+        } catch (e: Exception) {
+            Log.e("Brosco", "process() crashed on \"$rawText\": ${e.message}", e)
+            try {
+                rawSpeak("Sorry, that one tripped me up - try again.")
+            } catch (_: Exception) {
+                // even the fallback speak failed - nothing more we can safely do
+            }
+        }
+    }
+
+    private fun processInternal(
         context: Context,
         rawText: String,
         scope: CoroutineScope,
@@ -116,6 +160,27 @@ object CommandProcessor {
             }
             detectedIntent.type == IntentType.SMART_CLICK -> {
                 resolveSmartClick(detectedIntent.target, scope, speak)
+            }
+            // Real web search / deep research - always forced onto the
+            // search-capable model rather than left to silently fail on the
+            // plain chat model, which is what used to happen here.
+            detectedIntent.type == IntentType.SEARCH -> {
+                val query = detectedIntent.target.ifBlank { rawText }
+                speak("Let me look that up.")
+                scope.safeLaunch {
+                    val answer = withContext(Dispatchers.IO) {
+                        GroqApiClient.ask(context, query, forceSearch = true)
+                    }
+                    speak(answer)
+                    safeLaunch {
+                        val fact = withContext(Dispatchers.IO) {
+                            GroqApiClient.extractFact(rawText, answer)
+                        }
+                        if (!fact.equals("NONE", ignoreCase = true)) {
+                            LearnedFacts.add(context, fact)
+                        }
+                    }
+                }
             }
             detectedIntent.type == IntentType.YOUTUBE_SEARCH -> {
                 runYoutubeSearchFlow(context, detectedIntent.target, speak, onPlaybackStarted)
@@ -282,7 +347,7 @@ object CommandProcessor {
             }
             else -> {
                 speak("Let me think...")
-                scope.launch {
+                scope.safeLaunch {
                     val answer = withContext(Dispatchers.IO) {
                         GroqApiClient.ask(context, rawText)
                     }
@@ -291,7 +356,7 @@ object CommandProcessor {
                     // "Learning": pull out anything durable worth remembering
                     // from this exchange, in the background, after the fact -
                     // never blocks or delays the spoken reply itself.
-                    launch {
+                    safeLaunch {
                         val fact = withContext(Dispatchers.IO) {
                             GroqApiClient.extractFact(rawText, answer)
                         }
@@ -309,11 +374,11 @@ object CommandProcessor {
     // whatever's actually on screen right now, via the AI classifier.
     // ------------------------------------------------------------------
     private fun resolveSmartClick(phrase: String, scope: CoroutineScope, speak: (String) -> Unit) {
-        scope.launch {
+        scope.safeLaunch {
             val elements = WhatsAppAccessibilityService.snapshotScreen()
             if (elements.isEmpty()) {
                 speak("I can't see anything tappable right now.")
-                return@launch
+                return@safeLaunch
             }
 
             val listText = elements.joinToString("\n") { "${it.index}. ${it.label}" }
@@ -355,7 +420,7 @@ object CommandProcessor {
 
         speak("On it - ${pieces.size} steps.")
 
-        scope.launch {
+        scope.safeLaunch {
             for ((index, piece) in pieces.withIndex()) {
                 process(context, piece, this, onPlaybackStarted, speak)
                 if (index < pieces.lastIndex) {
