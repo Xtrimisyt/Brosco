@@ -8,118 +8,165 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"/>
 
-    <ScrollView
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:fillViewport="true">
+        android:orientation="vertical">
 
+        <!-- Header -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:gravity="center"
-            android:padding="32dp">
+            android:paddingTop="18dp"
+            android:paddingBottom="6dp">
 
             <TextView
                 android:id="@+id/statusText"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="24dp"
                 android:text="Brosco"
-                android:textSize="42sp"
+                android:textSize="24sp"
                 android:textStyle="bold"
                 android:letterSpacing="0.02"
-                android:textColor="#FFFFFF"
-                android:layout_marginBottom="10dp"/>
+                android:textColor="#FFFFFF"/>
 
-            <TextView
-                android:id="@+id/responseText"
+        </LinearLayout>
+
+        <!-- Chat transcript, Claude-style: scrolls, bubbles grow with content -->
+        <ScrollView
+            android:id="@+id/chatScroll"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:scrollbars="none"
+            android:fillViewport="true"
+            android:clipToPadding="false">
+
+            <LinearLayout
+                android:id="@+id/chatContainer"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Tap the mic, type below, or enable listening."
-                android:textSize="15sp"
-                android:textColor="#9B95C9"
-                android:gravity="center"
-                android:layout_marginBottom="40dp"/>
+                android:orientation="vertical"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="12dp">
 
-            <!-- Mic with animated pulse rings behind it -->
-            <FrameLayout
-                android:layout_width="220dp"
-                android:layout_height="220dp"
-                android:layout_marginBottom="36dp">
+                <TextView
+                    android:id="@+id/emptyStateText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="70dp"
+                    android:text="Tap the mic, type below, or enable listening."
+                    android:textSize="15sp"
+                    android:textColor="#9B95C9"
+                    android:gravity="center"/>
 
-                <View
-                    android:id="@+id/pulseRing1"
-                    android:layout_width="140dp"
-                    android:layout_height="140dp"
-                    android:layout_gravity="center"
-                    android:background="@drawable/pulse_ring"
-                    android:alpha="0"/>
+            </LinearLayout>
+        </ScrollView>
 
-                <View
-                    android:id="@+id/pulseRing2"
-                    android:layout_width="140dp"
-                    android:layout_height="140dp"
-                    android:layout_gravity="center"
-                    android:background="@drawable/pulse_ring"
-                    android:alpha="0"/>
+        <!-- Mic with animated pulse rings behind it -->
+        <FrameLayout
+            android:layout_width="150dp"
+            android:layout_height="150dp"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginBottom="4dp">
 
-                <Button
-                    android:id="@+id/micButton"
-                    android:layout_width="128dp"
-                    android:layout_height="128dp"
-                    android:layout_gravity="center"
-                    android:background="@drawable/mic_button_bg"
-                    android:text="🎤"
-                    android:textSize="40sp"
-                    android:stateListAnimator="@null"
-                    android:elevation="8dp"/>
+            <View
+                android:id="@+id/pulseRing1"
+                android:layout_width="110dp"
+                android:layout_height="110dp"
+                android:layout_gravity="center"
+                android:background="@drawable/pulse_ring"
+                android:alpha="0"/>
 
-            </FrameLayout>
+            <View
+                android:id="@+id/pulseRing2"
+                android:layout_width="110dp"
+                android:layout_height="110dp"
+                android:layout_gravity="center"
+                android:background="@drawable/pulse_ring"
+                android:alpha="0"/>
+
+            <Button
+                android:id="@+id/micButton"
+                android:layout_width="84dp"
+                android:layout_height="84dp"
+                android:layout_gravity="center"
+                android:background="@drawable/mic_button_bg"
+                android:text="🎤"
+                android:textSize="30sp"
+                android:stateListAnimator="@null"
+                android:elevation="8dp"/>
+
+        </FrameLayout>
+
+        <!-- Docked input bar -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp"
+            android:paddingBottom="16dp">
 
             <EditText
                 android:id="@+id/textInput"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:minHeight="52dp"
                 android:background="@drawable/rounded_input_bg"
                 android:hint="Type a command instead..."
                 android:textColorHint="#6E6795"
                 android:textColor="#FFFFFF"
                 android:textSize="15sp"
-                android:layout_marginBottom="16dp"/>
+                android:layout_marginBottom="10dp"/>
 
             <Button
                 android:id="@+id/sendTextButton"
                 android:layout_width="match_parent"
-                android:layout_height="56dp"
+                android:layout_height="52dp"
                 android:background="@drawable/rounded_button_primary"
                 android:text="SEND"
                 android:textColor="#FFFFFF"
                 android:textStyle="bold"
                 android:stateListAnimator="@null"
-                android:layout_marginBottom="24dp"/>
+                android:layout_marginBottom="10dp"/>
 
-            <Button
-                android:id="@+id/alwaysListenButton"
+            <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="52dp"
-                android:background="@drawable/rounded_button_outline"
-                android:text="ENABLE ALWAYS-LISTEN (APP OPEN)"
-                android:textColor="#C9C3F5"
-                android:textSize="12sp"
-                android:stateListAnimator="@null"
-                android:layout_marginBottom="14dp"/>
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
 
-            <Button
-                android:id="@+id/backgroundServiceButton"
-                android:layout_width="match_parent"
-                android:layout_height="52dp"
-                android:background="@drawable/rounded_button_outline"
-                android:text="START BACKGROUND BROSCO"
-                android:textColor="#C9C3F5"
-                android:textSize="12sp"
-                android:stateListAnimator="@null"/>
+                <Button
+                    android:id="@+id/alwaysListenButton"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:layout_marginEnd="6dp"
+                    android:background="@drawable/rounded_button_outline"
+                    android:text="ALWAYS-LISTEN"
+                    android:textColor="#C9C3F5"
+                    android:textSize="10sp"
+                    android:stateListAnimator="@null"/>
+
+                <Button
+                    android:id="@+id/backgroundServiceButton"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:layout_marginStart="6dp"
+                    android:background="@drawable/rounded_button_outline"
+                    android:text="BACKGROUND BROSCO"
+                    android:textColor="#C9C3F5"
+                    android:textSize="10sp"
+                    android:stateListAnimator="@null"/>
+
+            </LinearLayout>
 
         </LinearLayout>
-    </ScrollView>
+
+    </LinearLayout>
 </FrameLayout>
