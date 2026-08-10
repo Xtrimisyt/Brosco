@@ -140,6 +140,29 @@ object IntentDetector {
             return DetectedIntent(IntentType.SWIPE, direction)
         }
 
+        // SEARCH / WEB / DEEP RESEARCH - phrased loosely ("do a deep research
+        // on X", "search the web for X", "look that up", "google it") this
+        // used to fall through to the generic AI chat with no signal that a
+        // real lookup was wanted, which is why it used to just say it
+        // couldn't browse the internet. Now it's always tagged explicitly so
+        // CommandProcessor can force the search-capable model on.
+        val researchPhrases = listOf(
+            "deep research", "do research", "do a research", "research on",
+            "research about", "research into", "search the web", "browse the web",
+            "look this up", "look that up", "google that", "google it"
+        )
+        if (researchPhrases.any { input.contains(it) } || input.startsWith("research ")) {
+            val cleaned = input
+                .replace(Regex("deep research(ing)?( on| about| into| for)?"), "")
+                .replace(Regex("^(do( a)? )?research( on| about| into| for)?"), "")
+                .replace(Regex("search the web( for)?"), "")
+                .replace(Regex("browse the web( for)?"), "")
+                .replace(Regex("look (this|that) up( for)?"), "")
+                .replace(Regex("google (that|it)"), "")
+                .trim()
+            return DetectedIntent(IntentType.SEARCH, cleaned.ifBlank { input })
+        }
+
         // SEARCH (generic, kept for fallback/plain web search behaviour)
         val searchWords = listOf("search", "find", "look up")
         searchWords.forEach { word ->
