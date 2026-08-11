@@ -24,18 +24,11 @@ object GroqApiClient {
         "election", "war", "market", "stock price", "weather", "score"
     )
 
-    // Anything that sounds like the user wants a real lookup - these force
-    // the search-capable model on, so "search the web" / "deep research" /
-    // etc. actually get answered instead of the plain model saying it can't
-    // browse the internet.
     private val searchTriggers = newsKeywords + listOf(
         "search", "research", "look up", "look this up", "look that up",
         "browse", "google", "find out", "find information", "check online"
     )
 
-    // Heuristic-only, deliberately generous: if any of these show up we soften
-    // Brosco's usual dry-humor tone for that reply. False positives just mean
-    // one reply is a bit more gentle than strictly necessary - not a real cost.
     private val sadKeywords = listOf(
         "sad", "depress", "feeling down", "down today", "upset", "crying",
         "cried", "heartbroken", "heart broken", "lonely", "so alone",
@@ -50,12 +43,38 @@ object GroqApiClient {
         return sadKeywords.any { lower.contains(it) }
     }
 
-    /**
-     * Used by "smart click" (Section 4-lite): given a numbered list of
-     * on-screen elements and what the user said, pick the matching index.
-     * Uses a neutral system prompt (not Brosco's chatty persona) and a tiny
-     * token budget so the round trip stays fast and the reply is easy to parse.
-     */
+    private val depthSignals = listOf(
+        "explain", "why", "how does", "how do", "walk me through",
+        "in detail", "elaborate", "break down", "breakdown", "compare",
+        "difference between", "pros and cons", "story", "tell me about",
+        "what do you think about", "your opinion on", "your take on",
+        "help me understand", "give me the full", "everything about"
+    )
+
+    private val brevitySignals = listOf(
+        "what time", "what's the time", "how many", "yes or no",
+        "quick question", "in one word", "briefly", "just tell me",
+        "real quick", "one line"
+    )
+
+    private fun estimateMaxTokens(query: String, needsSearch: Boolean): Int {
+        if (needsSearch) return 900
+
+        val lower = query.lowercase()
+        val wordCount = query.trim().split(Regex("\\s+")).size
+
+        val wantsBrevity = brevitySignals.any { lower.contains(it) }
+        val wantsDepth = depthSignals.any { lower.contains(it) }
+
+        return when {
+            wantsBrevity -> 90
+            wantsDepth -> 700
+            wordCount <= 6 -> 180
+            wordCount <= 20 -> 400
+            else -> 600
+        }
+    }
+
     fun classify(prompt: String): String {
         val body = JSONObject().apply {
             put("model", "llama-3.3-70b-versatile")
@@ -96,13 +115,6 @@ object GroqApiClient {
         }
     }
 
-    /**
-     * "Learning": after a real conversation exchange, this checks whether
-     * anything durable worth remembering long-term came up (a preference, a
-     * routine, an ongoing situation) - not logged from every trivial command,
-     * just genuine conversation. Returns "NONE" when there's nothing worth
-     * keeping, which the caller should not persist.
-     */
     fun extractFact(userText: String, assistantText: String): String {
         val body = JSONObject().apply {
             put("model", "llama-3.3-70b-versatile")
@@ -113,10 +125,13 @@ object GroqApiClient {
                     put("role", "system")
                     put("content", "You extract durable facts about a user from one exchange with their " +
                         "assistant, for long-term memory. A durable fact is a preference, routine, " +
-                        "relationship, ongoing situation, or similar detail worth remembering weeks from " +
-                        "now - NOT small talk, NOT one-off requests, NOT anything already generic. " +
-                        "Reply with ONE short third-person sentence (e.g. 'Prefers Spotify over other " +
-                        "music apps.'). If nothing durable came up, reply exactly NONE.")
+                        "relationship, ongoing situation, or HOW THEY LIKE TO BE TALKED TO (e.g. they " +
+                        "said an answer was too long, asked for more detail, corrected the assistant's " +
+                        "tone, said 'just get to the point', etc.) - NOT small talk, NOT one-off " +
+                        "requests, NOT anything already generic. Reply with ONE short third-person " +
+                        "sentence (e.g. 'Prefers Spotify over other music apps.' or 'Wants short, direct " +
+                        "answers - said a previous reply was too long.'). If nothing durable came up, " +
+                        "reply exactly NONE.")
                 })
                 put(JSONObject().apply {
                     put("role", "user")
@@ -145,12 +160,6 @@ object GroqApiClient {
         }
     }
 
-    /**
-     * @param forceSearch set true whenever the intent layer already decided this
-     * is an explicit "search the web" / "deep research" / "look this up" request
-     * - always routes to the real search-capable model instead of relying on
-     * keyword-sniffing the raw query, so those requests never silently fail.
-     */
     fun ask(context: Context, query: String, forceSearch: Boolean = false): String {
         val lower = query.lowercase()
         val needsSearch = forceSearch || searchTriggers.any { lower.contains(it) }
@@ -162,9 +171,6 @@ object GroqApiClient {
         val factsBlock = if (facts.isEmpty()) "" else
             "\n\nWhat you've learned about Shrey over time:\n" + facts.joinToString("\n") { "- $it" }
 
-        // If either the current message or the last couple of turns sound
-        // heavy, drop the usual dry humor and answer like a grounded, present
-        // human would - not a diagnosis, just a tonal shift.
         val recentlySad = soundsSad(query) || history.takeLast(4).any { soundsSad(it.text) }
         val toneBlock = if (recentlySad) {
             "\n\nRight now Shrey seems to be going through something heavy, or just having a hard " +
@@ -185,7 +191,7 @@ object GroqApiClient {
 
         val body = JSONObject().apply {
             put("model", model)
-            put("max_tokens", if (needsSearch) 900 else 500)
+            put("max_tokens", estimateMaxTokens(query, needsSearch))
             put("messages", JSONArray().apply {
                 put(JSONObject().apply {
                     put("role", "system")
@@ -204,11 +210,16 @@ object GroqApiClient {
                         "You remember past conversations (given below as message history) - use them " +
                         "for continuity when it's actually relevant, but don't force references to old " +
                         "topics if the current question doesn't need them. " +
-                        "Answer as fully as the question actually needs - quick questions get quick, " +
-                        "punchy answers, but don't artificially cut a real explanation, story, or research " +
-                        "result short just to stay brief. Speak in plain, natural language - avoid heavy " +
-                        "markdown like asterisks or headers since replies may be read aloud, but do break " +
-                        "longer answers into short paragraphs so they're easy to read on screen too." +
+                        "Read the shape of the question before answering: 'what time is it' gets one " +
+                        "line, 'call mom' gets a one-line confirmation, 'explain how X works' or 'what do " +
+                        "you think about Y' earns real paragraphs. Match effort to what's actually being " +
+                        "asked instead of defaulting to one length for everything - a short question " +
+                        "padded out reads as filler, and a real question cut short reads as not " +
+                        "listening. When in doubt, answer the direct question first in one or two " +
+                        "sentences, then only keep going if there's something genuinely useful to add. " +
+                        "Speak in plain, natural language - avoid heavy markdown like asterisks or " +
+                        "headers since replies may be read aloud, but do break longer answers into short " +
+                        "paragraphs so they're easy to read on screen too." +
                         factsBlock + toneBlock + searchBlock)
                 })
                 history.forEach { turn ->
@@ -241,20 +252,15 @@ object GroqApiClient {
             }
         } catch (e: Exception) {
             if (needsSearch) {
-                // Retry once on the plain model rather than failing outright -
-                // a slightly worse answer beats "I couldn't reach the server"
-                // for something the user explicitly asked us to look up.
                 try {
                     return askFallbackNoSearch(context, query)
                 } catch (_: Exception) {
-                    // fall through to the generic message below
                 }
             }
             "I couldn't reach the server. Check your connection."
         }
     }
 
-    /** Best-effort retry without the search-capable model, used only if the forced-search call itself fails. */
     private fun askFallbackNoSearch(context: Context, query: String): String {
         val body = JSONObject().apply {
             put("model", "llama-3.3-70b-versatile")
