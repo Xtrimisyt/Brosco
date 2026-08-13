@@ -13,8 +13,14 @@ sealed class AutomationStep {
     /** Find an editable field (search bar, chat box, etc.) and type into it. */
     data class TypeText(val text: String) : AutomationStep()
 
-    /** Tap the first node whose text/content-description contains this string. */
-    data class ClickText(val text: String, val exactMatch: Boolean = false) : AutomationStep()
+    /**
+     * Tap the first node whose text/content-description contains this string.
+     * [optional] steps give up quickly (short timeout) and just move on to
+     * the next step if nothing matches, instead of eating the full 5s step
+     * timeout - for "tap this if it's there" cases like a Play button that
+     * may or may not be showing depending on app state.
+     */
+    data class ClickText(val text: String, val exactMatch: Boolean = false, val optional: Boolean = false) : AutomationStep()
 
     /** Tap a node by its Android view id, e.g. "com.whatsapp:id/send". */
     data class ClickId(val viewId: String) : AutomationStep()
@@ -75,3 +81,12 @@ enum class SwipeDirection { UP, DOWN, LEFT, RIGHT }
 
 /** A tappable element currently on screen, captured for the AI-assisted "smart click" resolver. */
 data class ScreenElement(val index: Int, val label: String, val x: Float, val y: Float)
+
+/**
+ * The most recent message bubble found in an open WhatsApp chat, captured
+ * for the smart-reply feature. [isOutgoing] is a best-effort guess based on
+ * which side of the screen the bubble sits on (WhatsApp aligns received
+ * messages left, sent messages right) - there's no reliable text signal for
+ * this, so it's a heuristic, not a guarantee.
+ */
+data class WhatsAppMessageSnapshot(val text: String, val isOutgoing: Boolean)
