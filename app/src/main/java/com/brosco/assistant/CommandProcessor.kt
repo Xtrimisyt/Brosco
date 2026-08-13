@@ -111,6 +111,12 @@ object CommandProcessor {
             rawSpeak(response)
         }
 
+        // "message X saying Y" is the normal short form; "whatsapp X saying Y"
+        // and "message X on whatsapp saying Y" still work too. Deliberately
+        // NOT gated on the word "whatsapp" appearing anywhere in the text -
+        // that guard used to force the short form ("message rahul saying
+        // hey") past this branch and down into the plain-SMS fallback below,
+        // since it starts with "message" but never says the word "whatsapp".
         val whatsappRegex = Regex("(?:message|whatsapp)\\s+(.+?)\\s+(?:on whatsapp\\s+)?saying\\s+(.+)")
         val whatsappMatch = whatsappRegex.find(text)
 
@@ -120,6 +126,19 @@ object CommandProcessor {
                 MemoryStore.clear(context)
                 LearnedFacts.clear(context)
                 speak("Done - I've forgotten everything up to now.")
+            }
+
+            // Section 6: WhatsApp smart replies
+            detectedIntent.type == IntentType.WHATSAPP_SMART_REPLY -> {
+                runWhatsAppSmartReply(context, scope, speak)
+            }
+            detectedIntent.type == IntentType.SELECT_SMART_REPLY -> {
+                runSelectSmartReply(detectedIntent.target, speak)
+            }
+
+            // Section 7: screen-aware Q&A
+            detectedIntent.type == IntentType.SCREEN_QA -> {
+                runScreenQa(context, rawText, scope, speak)
             }
 
             // Section 5: chained commands - "open zomato then search burger then add to cart"
@@ -168,8 +187,9 @@ object CommandProcessor {
                 val query = detectedIntent.target.ifBlank { rawText }
                 speak("Let me look that up.")
                 scope.safeLaunch {
+                    val screenText = withContext(Dispatchers.IO) { WhatsAppAccessibilityService.captureScreenText() }
                     val answer = withContext(Dispatchers.IO) {
-                        GroqApiClient.ask(context, query, forceSearch = true)
+                        GroqApiClient.ask(context, query, forceSearch = true, screenText = screenText)
                     }
                     speak(answer)
                     safeLaunch {
@@ -315,7 +335,9 @@ object CommandProcessor {
             }
 
             // Legacy fallback checks
-            whatsappMatch != null && text.contains("whatsapp") -> {
+            // "message X saying Y" / "whatsapp X saying Y" -> always WhatsApp,
+            // regardless of whether the word "whatsapp" shows up anywhere else.
+            whatsappMatch != null -> {
                 val name = whatsappMatch.groupValues[1].trim()
                 val message = whatsappMatch.groupValues[2].trim()
                 sendWhatsAppMessage(context, name, message, speak)
@@ -324,7 +346,9 @@ object CommandProcessor {
                 val name = text.removePrefix("call ").trim()
                 callContact(context, name, speak)
             }
-            text.startsWith("text ") || text.startsWith("message ") -> {
+            // Only plain SMS reaches here now - "message ... saying ..." is
+            // caught by whatsappMatch above before this branch is ever checked.
+            text.startsWith("text ") -> {
                 val body = text.substringAfter(" ").trim()
                 val parts = body.split(" saying ", limit = 2)
                 if (parts.size == 2) {
@@ -332,6 +356,12 @@ object CommandProcessor {
                 } else {
                     speak("Say it like: text John saying I'm on my way")
                 }
+            }
+            // "message John" with no "saying <text>" yet - missed the whatsapp
+            // regex above because there's nothing to send, not because it
+            // wasn't meant for WhatsApp.
+            text.startsWith("message ") -> {
+                speak("Say it like: message ${text.removePrefix("message ").trim().ifBlank { "John" }} saying I'm on my way")
             }
             text.startsWith("order ") -> {
                 val food = text.removePrefix("order ").trim().replace(" from ", " ")
@@ -348,8 +378,15 @@ object CommandProcessor {
             else -> {
                 speak("Let me think...")
                 scope.safeLaunch {
+                    // Best-effort read of whatever's on screen right now, so
+                    // "what does this say" / "reply to this" / "summarize
+                    // this" etc. actually have something to work with instead
+                    // of Brosco having no idea what Shrey's looking at. Works
+                    // the same whether this came from the foreground app or
+                    // the background listener - both run through here.
+                    val screenText = withContext(Dispatchers.IO) { WhatsAppAccessibilityService.captureScreenText() }
                     val answer = withContext(Dispatchers.IO) {
-                        GroqApiClient.ask(context, rawText)
+                        GroqApiClient.ask(context, rawText, screenText = screenText)
                     }
                     speak(answer)
 
@@ -395,6 +432,88 @@ object CommandProcessor {
             } else {
                 speak("I couldn't find that on screen.")
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Section 6: WhatsApp smart replies - read the latest incoming message,
+    // ask the AI for 2-3 short reply options, speak them, and remember them
+    // in SmartReplyStore so "reply with the second one" knows what to send.
+    // ------------------------------------------------------------------
+    private fun runWhatsAppSmartReply(context: Context, scope: CoroutineScope, speak: (String) -> Unit) {
+        scope.safeLaunch {
+            val latest = withContext(Dispatchers.IO) { WhatsAppAccessibilityService.captureLatestWhatsAppMessage() }
+            if (latest == null) {
+                speak("I can't see a WhatsApp chat open right now - open the conversation first.")
+                return@safeLaunch
+            }
+            if (latest.isOutgoing) {
+                speak("Looks like the last message there was yours - nothing new to reply to.")
+                SmartReplyStore.clear()
+                return@safeLaunch
+            }
+            val options = withContext(Dispatchers.IO) { GroqApiClient.suggestReplies(latest.text) }
+            if (options.isEmpty()) {
+                speak("I couldn't come up with a reply for that one - try wording your own.")
+                return@safeLaunch
+            }
+            SmartReplyStore.set(options)
+            val spokenOptions = options.mapIndexed { i, opt -> "${ordinalWord(i + 1)}: $opt" }.joinToString(". ")
+            speak(
+                "They said: \"${latest.text}\". You could reply - $spokenOptions. " +
+                    "Just say something like \"reply with the second one\"."
+            )
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Section 6: "reply with the second one" - looks up the stored option
+    // and actually sends it in whichever WhatsApp chat is currently open.
+    // ------------------------------------------------------------------
+    private fun runSelectSmartReply(ordinalText: String, speak: (String) -> Unit) {
+        val index = ordinalText.toIntOrNull()
+        val options = SmartReplyStore.get()
+        if (options == null) {
+            speak("I don't have any reply suggestions right now - ask me to check WhatsApp first.")
+            return
+        }
+        val chosen = index?.let { options.getOrNull(it - 1) }
+        if (chosen == null) {
+            speak("I only have ${options.size} option${if (options.size == 1) "" else "s"} - which one did you mean?")
+            return
+        }
+        WhatsAppAccessibilityService.runTask(
+            listOf(AutomationStep.TypeText(chosen), AutomationStep.Wait(300), AutomationStep.ClickWhatsAppSend),
+            onUpdate = { speak(it) },
+            onDone = { speak("Sent.") }
+        )
+        SmartReplyStore.clear()
+    }
+
+    private fun ordinalWord(n: Int): String = when (n) {
+        1 -> "first"
+        2 -> "second"
+        3 -> "third"
+        else -> "option $n"
+    }
+
+    // ------------------------------------------------------------------
+    // Section 7: screen-aware Q&A - "what does this error say", "summarize
+    // this article" - reads the current screen's text via the accessibility
+    // tree and hands it to the AI as the primary source for the answer.
+    // ------------------------------------------------------------------
+    private fun runScreenQa(context: Context, rawText: String, scope: CoroutineScope, speak: (String) -> Unit) {
+        scope.safeLaunch {
+            val screenText = withContext(Dispatchers.IO) { WhatsAppAccessibilityService.captureScreenText(maxChars = 3000) }
+            if (screenText.isBlank()) {
+                speak("I can't read anything on screen right now - make sure Brosco's accessibility service is on.")
+                return@safeLaunch
+            }
+            speak("Let me check your screen.")
+            val answer = withContext(Dispatchers.IO) {
+                GroqApiClient.ask(context, rawText, screenText = screenText, forceScreenFocus = true)
+            }
+            speak(answer)
         }
     }
 
@@ -636,7 +755,16 @@ object CommandProcessor {
                 AutomationStep.Wait(500),
                 AutomationStep.TypeText(term),
                 AutomationStep.Wait(1800),
-                AutomationStep.ClickFirstResult(excludeText = term)
+                AutomationStep.ClickFirstResult(excludeText = term),
+                // JioSaavn (unlike YouTube) usually opens the song on the
+                // player screen PAUSED rather than auto-playing it - that's
+                // the "I have to manually click it" bug. Give the player a
+                // moment to load, then tap the Play button if one's showing.
+                // Marked optional so if it already started playing (no Play
+                // button to find, it'll show Pause instead) this just gets
+                // skipped quickly instead of stalling the flow.
+                AutomationStep.Wait(900),
+                AutomationStep.ClickText("Play", exactMatch = true, optional = true)
             ),
             onUpdate = { speak(it) },
             onDone = {
