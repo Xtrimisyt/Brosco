@@ -85,6 +85,36 @@ class WhatsAppAccessibilityService : AccessibilityService() {
                 Log.e("Brosco", "snapshotScreen failed: ${e.message}")
                 emptyList()
             }
+
+        /**
+         * "Vision" for general Q&A rather than tap-resolution: a best-effort
+         * plain-text reading of whatever's currently on screen (which app is
+         * foreground + the visible text/labels on it), so the AI chat path
+         * can actually answer things like "what does this say" or "reply to
+         * this" instead of having zero idea what Shrey is looking at. Capped
+         * hard so it never balloons a chat prompt.
+         */
+        fun captureScreenText(maxChars: Int = 1500): String =
+            try {
+                instance?.captureScreenTextSummary(maxChars) ?: ""
+            } catch (e: Exception) {
+                Log.e("Brosco", "captureScreenText failed: ${e.message}")
+                ""
+            }
+
+        /**
+         * Section 6 (smart replies): best-effort read of the most recent
+         * message bubble in an open WhatsApp chat, plus a guess at whether
+         * it's incoming or outgoing. Returns null if WhatsApp isn't the
+         * foreground app or nothing readable was found.
+         */
+        fun captureLatestWhatsAppMessage(): WhatsAppMessageSnapshot? =
+            try {
+                instance?.captureLatestWhatsAppMessageInternal()
+            } catch (e: Exception) {
+                Log.e("Brosco", "captureLatestWhatsAppMessage failed: ${e.message}")
+                null
+            }
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -107,6 +137,13 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     private val tickBudgetMs = 120L
 
     private fun withinBudget(): Boolean = visitBudget > 0 && System.currentTimeMillis() < tickDeadline
+
+    // "Optional" ClickText steps (e.g. a Play button that may already be
+    // gone because playback auto-started) give up fast instead of eating
+    // the full step timeout, so a flow doesn't stall for 5s over a tap that
+    // was never going to land.
+    private fun effectiveTimeoutMs(step: AutomationStep): Long =
+        if (step is AutomationStep.ClickText && step.optional) 900L else STEP_TIMEOUT_MS
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -224,7 +261,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             currentStepAttempts = 0
             currentStepStartedAt = System.currentTimeMillis()
             if (taskQueue.isEmpty()) onTaskDone?.invoke()
-        } else if (abandon || elapsed > STEP_TIMEOUT_MS || currentStepAttempts > MAX_STALL_TICKS) {
+        } else if (abandon || elapsed > effectiveTimeoutMs(step) || currentStepAttempts > MAX_STALL_TICKS) {
             Log.w("Brosco", "Giving up on step $step after $currentStepAttempts attempts")
             taskQueue.removeFirstOrNull()
             currentStepAttempts = 0
@@ -271,6 +308,123 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             collectClickables(node.getChild(i), depth + 1, out)
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Plain-text screen reading for general AI Q&A (see captureScreenText).
+    // Unlike collectClickables this walks EVERY node with visible text, not
+    // just clickable ones - reading a chat bubble or an article needs the
+    // static text nodes, not the buttons around them.
+    // ------------------------------------------------------------------
+    private fun captureScreenTextSummary(maxChars: Int): String {
+        val root = rootInActiveWindow ?: return ""
+        visitBudget = maxVisits
+        val lines = mutableListOf<String>()
+        collectVisibleText(root, depth = 0, lines)
+
+        val appLabel = try {
+            val pkg = root.packageName?.toString()
+            val appInfo = pkg?.let { packageManager.getApplicationInfo(it, 0) }
+            appInfo?.let { packageManager.getApplicationLabel(it).toString() } ?: pkg
+        } catch (e: Exception) {
+            root.packageName?.toString()
+        }
+
+        val header = if (appLabel != null) "Currently open: $appLabel\n" else ""
+        val body = lines.distinct().joinToString("\n")
+        val combined = header + body
+        return if (combined.length > maxChars) combined.take(maxChars) else combined
+    }
+
+    private fun collectVisibleText(node: AccessibilityNodeInfo?, depth: Int, out: MutableList<String>) {
+        if (node == null || depth > 40 || !withinBudget() || out.size >= 200) return
+        visitBudget--
+
+        if (node.isVisibleToUser) {
+            val text = node.text?.toString()?.trim()
+            if (!text.isNullOrBlank() && !node.isEditable) {
+                out.add(text.take(140))
+            }
+        }
+
+        for (i in 0 until node.childCount) {
+            collectVisibleText(node.getChild(i), depth + 1, out)
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Section 6: latest WhatsApp message + rough incoming/outgoing guess.
+    // WhatsApp tags its message bubble text with a stable view id
+    // ("com.whatsapp:id/message_text") which we prefer - if a future
+    // WhatsApp version changes that id, fall back to any non-editable text
+    // node that doesn't look like chrome (timestamps, "Online", the empty
+    // compose-box hint, etc). Whichever pool has hits, the bubble with the
+    // lowest bottom edge (furthest down the screen) is the most recent
+    // message, since the conversation flows top-to-bottom with newest last.
+    // ------------------------------------------------------------------
+    private fun captureLatestWhatsAppMessageInternal(): WhatsAppMessageSnapshot? {
+        val root = rootInActiveWindow ?: return null
+        val pkg = root.packageName?.toString()
+        if (pkg != "com.whatsapp" && pkg != "com.whatsapp.w4b") return null
+
+        visitBudget = maxVisits
+        val idMatches = mutableListOf<Pair<String, Rect>>()
+        val fallback = mutableListOf<Pair<String, Rect>>()
+        collectMessageCandidates(root, depth = 0, idMatches, fallback)
+
+        val pool = idMatches.ifEmpty { fallback }
+        val (text, bounds) = pool.maxByOrNull { it.second.bottom } ?: return null
+
+        val screenWidth = resources.displayMetrics.widthPixels
+        // WhatsApp aligns received bubbles left, sent bubbles right - not a
+        // perfect signal (e.g. system messages centered) but good enough as
+        // a best-effort guess.
+        val isOutgoing = bounds.centerX() > screenWidth / 2
+        return WhatsAppMessageSnapshot(text, isOutgoing)
+    }
+
+    private fun collectMessageCandidates(
+        node: AccessibilityNodeInfo?,
+        depth: Int,
+        idMatches: MutableList<Pair<String, Rect>>,
+        fallback: MutableList<Pair<String, Rect>>
+    ) {
+        if (node == null || depth > 40 || !withinBudget()) return
+        visitBudget--
+
+        if (node.isVisibleToUser && !node.isEditable) {
+            val text = node.text?.toString()?.trim()
+            if (!text.isNullOrBlank()) {
+                val bounds = Rect()
+                node.getBoundsInScreen(bounds)
+                if (!bounds.isEmpty) {
+                    val idName = try { node.viewIdResourceName } catch (e: Exception) { null }
+                    val entry = text.take(500) to bounds
+                    if (idName == "com.whatsapp:id/message_text") {
+                        idMatches.add(entry)
+                    } else if (!looksLikeChatChrome(text)) {
+                        fallback.add(entry)
+                    }
+                }
+            }
+        }
+
+        for (i in 0 until node.childCount) {
+            collectMessageCandidates(node.getChild(i), depth + 1, idMatches, fallback)
+        }
+    }
+
+    private val timestampPattern = Regex("^\\d{1,2}:\\d{2}( ?[APap][Mm])?$")
+    private val chatChromeWords = setOf(
+        "type a message", "online", "typing...", "tap to add a caption",
+        "today", "yesterday", "message", "search"
+    )
+
+    private fun looksLikeChatChrome(text: String): Boolean {
+        val t = text.trim()
+        if (t.length <= 1) return true
+        if (timestampPattern.matches(t)) return true
+        return chatChromeWords.contains(t.lowercase())
     }
 
     // ------------------------------------------------------------------
