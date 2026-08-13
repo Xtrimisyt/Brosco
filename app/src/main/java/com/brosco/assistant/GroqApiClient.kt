@@ -160,7 +160,65 @@ object GroqApiClient {
         }
     }
 
-    fun ask(context: Context, query: String, forceSearch: Boolean = false): String {
+    /**
+     * Section 6: given the latest incoming WhatsApp message, generates 2-3
+     * short, genuinely different quick-reply options for Shrey to choose
+     * from by number/ordinal ("reply with the second one").
+     */
+    fun suggestReplies(incomingMessage: String): List<String> {
+        val body = JSONObject().apply {
+            put("model", "llama-3.3-70b-versatile")
+            put("max_tokens", 120)
+            put("temperature", 0.7)
+            put("messages", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "system")
+                    put("content", "You write short WhatsApp quick-reply suggestions for Shrey. Given " +
+                        "the message he just received, reply with exactly 3 short, natural, casual reply " +
+                        "options he could send back - each on its own line, no numbering, no quotes, no " +
+                        "labels. Keep each under 12 words. Make the 3 genuinely different from each " +
+                        "other (e.g. a short/casual one, a slightly more detailed one, and one that asks " +
+                        "a follow-up question) rather than just reworded versions of the same reply.")
+                })
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", "Message received: \"$incomingMessage\"")
+                })
+            })
+        }
+
+        val request = Request.Builder()
+            .url(URL)
+            .addHeader("Authorization", "Bearer $API_KEY")
+            .addHeader("content-type", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        return try {
+            client.newCall(request).execute().use { response ->
+                val json = JSONObject(response.body?.string() ?: "{}")
+                val choices = json.optJSONArray("choices") ?: return emptyList()
+                if (choices.length() == 0) return emptyList()
+                val message = choices.getJSONObject(0).optJSONObject("message")
+                val content = message?.optString("content") ?: return emptyList()
+                content.lines()
+                    .map { it.trim().trim('"').trimStart('-', '*', '•').trim() }
+                    .map { it.replace(Regex("^\\d+[.):]\\s*"), "") }
+                    .filter { it.isNotBlank() }
+                    .take(3)
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun ask(
+        context: Context,
+        query: String,
+        forceSearch: Boolean = false,
+        screenText: String = "",
+        forceScreenFocus: Boolean = false
+    ): String {
         val lower = query.lowercase()
         val needsSearch = forceSearch || searchTriggers.any { lower.contains(it) }
 
@@ -180,6 +238,27 @@ object GroqApiClient {
                 "Don't diagnose him, don't lecture him, and don't launch into a list of things he should " +
                 "do. Acknowledge what's going on in your own words, keep it short and human, and only " +
                 "offer a next step if it actually fits naturally."
+        } else ""
+
+        val screenBlock = if (screenText.isNotBlank()) {
+            if (forceScreenFocus) {
+                // Section 7: screen-aware Q&A - Shrey explicitly asked about
+                // what's on screen ("what does this say", "summarize this
+                // article"), so treat the reading as the primary source
+                // rather than optional background context.
+                "\n\nShrey is asking about what's currently on his phone screen. Here's a best-effort " +
+                    "text reading of it (may be partial, out of visual reading order, or have some UI " +
+                    "chrome mixed in with the real content):\n\"\"\"\n$screenText\n\"\"\"\n" +
+                    "Answer his question using this as the primary source. If it genuinely doesn't " +
+                    "contain enough to answer, say so plainly rather than guessing."
+            } else {
+                "\n\nWhat's currently visible on Shrey's phone screen right now (best-effort text " +
+                    "reading, may be partial or slightly stale):\n\"\"\"\n$screenText\n\"\"\"\n" +
+                    "Only use this if it's actually relevant to what he just asked - e.g. \"what does " +
+                    "this say\", \"reply to this\", \"summarize this\", or a question that clearly refers " +
+                    "to something on screen. Don't mention or describe the screen unprompted, and don't " +
+                    "treat it as something he said."
+            }
         } else ""
 
         val searchBlock = if (needsSearch) {
@@ -219,8 +298,13 @@ object GroqApiClient {
                         "sentences, then only keep going if there's something genuinely useful to add. " +
                         "Speak in plain, natural language - avoid heavy markdown like asterisks or " +
                         "headers since replies may be read aloud, but do break longer answers into short " +
-                        "paragraphs so they're easy to read on screen too." +
-                        factsBlock + toneBlock + searchBlock)
+                        "paragraphs so they're easy to read on screen too. " +
+                        "Use common sense on what Shrey actually means, even if it's phrased casually, " +
+                        "vaguely, or with a typo/misheard word - don't make him repeat himself or " +
+                        "over-specify. If a reasonable person would know what he meant, just go with " +
+                        "that reading and answer directly instead of asking him to clarify; only ask a " +
+                        "clarifying question when it's genuinely ambiguous between very different things." +
+                        factsBlock + toneBlock + screenBlock + searchBlock)
                 })
                 history.forEach { turn ->
                     put(JSONObject().apply {
