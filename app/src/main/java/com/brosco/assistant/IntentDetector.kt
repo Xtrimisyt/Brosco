@@ -44,6 +44,16 @@ enum class IntentType {
     // video", "the add button next to that")
     SMART_CLICK,
 
+    // Section 6: WhatsApp smart replies - read the latest incoming message,
+    // offer 2-3 AI-generated reply options, and let a follow-up command pick
+    // one ("reply with the second one") to actually send.
+    WHATSAPP_SMART_REPLY,
+    SELECT_SMART_REPLY,
+
+    // Section 7: screen-aware Q&A - "what does this error say", "summarize
+    // this article" - answered from a live read of the current screen.
+    SCREEN_QA,
+
     // Memory
     CLEAR_MEMORY,
 
@@ -63,6 +73,40 @@ object IntentDetector {
         " then ", " and then ", " -> ", " after that ", " followed by "
     )
 
+    // Section 6: "reply with the second one" / "send the first option" /
+    // "use option 2" - selects one of the options SmartReplyStore is
+    // currently holding. Captures the ordinal word/digit in group 1.
+    private val smartReplySelectRegex = Regex(
+        "(?:reply with|send|use)\\s+(?:the\\s+)?(?:option\\s+)?(first|second|third|1st|2nd|3rd|one|two|three|1|2|3)(?:\\s+(?:one|option|reply))?"
+    )
+
+    private fun parseOrdinalWord(word: String): Int? = when (word.trim().lowercase()) {
+        "first", "1st", "one", "1" -> 1
+        "second", "2nd", "two", "2" -> 2
+        "third", "3rd", "three", "3" -> 3
+        else -> null
+    }
+
+    // Phrases that ask Brosco to read the latest WhatsApp message and offer
+    // reply suggestions, rather than select one that's already been offered.
+    private val smartReplyTriggers = listOf(
+        "read my whatsapp", "read my messages", "read my message", "check whatsapp",
+        "check my whatsapp", "any new messages", "new whatsapp message", "smart reply",
+        "smart replies", "suggest a reply", "suggest replies", "what should i reply",
+        "how should i reply", "help me reply", "read this message", "read the message",
+        "what did they say", "what did they text"
+    )
+
+    // Phrases that ask Brosco to read/explain/summarize whatever's on screen
+    // right now, without a manual copy-paste.
+    private val screenQaTriggers = listOf(
+        "what does this say", "what does this error say", "what does that say",
+        "summarize this", "summarise this", "read this to me", "read that to me",
+        "translate this", "what is this error", "explain this screen",
+        "what's on my screen", "whats on my screen", "read my screen",
+        "what does this mean", "explain this error"
+    )
+
     fun detect(text: String): DetectedIntent {
 
         val input = text.lowercase().trim()
@@ -80,6 +124,23 @@ object IntentDetector {
             input.contains("wipe your memory")
         ) {
             return DetectedIntent(IntentType.CLEAR_MEMORY)
+        }
+
+        // ---- Section 6: WhatsApp smart replies ----
+        // Selecting an already-offered option is checked first since its
+        // phrasing ("reply with...", "send...") could otherwise get pulled
+        // into the generic message/send handling further down.
+        smartReplySelectRegex.find(input)?.let { match ->
+            val ordinal = parseOrdinalWord(match.groupValues[1])
+            if (ordinal != null) return DetectedIntent(IntentType.SELECT_SMART_REPLY, ordinal.toString())
+        }
+        if (smartReplyTriggers.any { input.contains(it) }) {
+            return DetectedIntent(IntentType.WHATSAPP_SMART_REPLY)
+        }
+
+        // ---- Section 7: screen-aware Q&A ----
+        if (screenQaTriggers.any { input.contains(it) }) {
+            return DetectedIntent(IntentType.SCREEN_QA, input)
         }
 
         // ---- Section 3: named app-automation flows ----
