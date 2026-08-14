@@ -593,7 +593,7 @@ object CommandProcessor {
             AutomationStep.Wait(500),
             AutomationStep.TypeText(query),
             AutomationStep.Wait(1600),
-            AutomationStep.ClickFirstResult(excludeText = query),
+            AutomationStep.ClickFirstResult(excludeText = query, matchQuery = query),
             AutomationStep.Wait(1600),
             AutomationStep.ClickText("Add"),
             AutomationStep.Wait(700),
@@ -634,7 +634,7 @@ object CommandProcessor {
             AutomationStep.Wait(500),
             AutomationStep.TypeText(query),
             AutomationStep.Wait(1600),
-            AutomationStep.ClickFirstResult(excludeText = query),
+            AutomationStep.ClickFirstResult(excludeText = query, matchQuery = query),
             AutomationStep.Wait(1400),
             AutomationStep.ClickText("Medium"),
             AutomationStep.Wait(700),
@@ -683,7 +683,7 @@ object CommandProcessor {
                 // match usually found nothing (or re-tapped the search
                 // suggestion echoing the query) and the flow silently
                 // stalled without ever pressing play.
-                AutomationStep.ClickFirstResult(excludeText = term, minYFraction = 0.16f)
+                AutomationStep.ClickFirstResult(excludeText = term, minYFraction = 0.16f, matchQuery = term)
             ),
             onUpdate = { speak(it) },
             onDone = {
@@ -717,7 +717,7 @@ object CommandProcessor {
                 AutomationStep.Wait(500),
                 AutomationStep.TypeText(term),
                 AutomationStep.Wait(1800),
-                AutomationStep.ClickFirstResult(excludeText = term)
+                AutomationStep.ClickFirstResult(excludeText = term, matchQuery = term)
             ),
             onUpdate = { speak(it) },
             onDone = {
@@ -755,7 +755,7 @@ object CommandProcessor {
                 AutomationStep.Wait(500),
                 AutomationStep.TypeText(term),
                 AutomationStep.Wait(1800),
-                AutomationStep.ClickFirstResult(excludeText = term),
+                AutomationStep.ClickFirstResult(excludeText = term, matchQuery = term),
                 // JioSaavn (unlike YouTube) usually opens the song on the
                 // player screen PAUSED rather than auto-playing it - that's
                 // the "I have to manually click it" bug. Give the player a
