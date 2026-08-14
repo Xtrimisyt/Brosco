@@ -231,7 +231,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
                 success = root?.packageName?.toString() == step.packageName
             }
             is AutomationStep.ClickFirstResult -> {
-                success = root != null && clickFirstResult(root, step.excludeText, step.minYFraction)
+                success = root != null && clickFirstResult(root, step.excludeText, step.minYFraction, step.matchQuery)
             }
             is AutomationStep.Swipe -> {
                 success = performSwipe(step.direction)
@@ -427,11 +427,55 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         return chatChromeWords.contains(t.lowercase())
     }
 
+    // Generic words that show up in almost every item name in a food-app
+    // search ("pizza", "medium", "the") and so carry no distinguishing
+    // signal - stripped before scoring so e.g. "peppy paneer" doesn't just
+    // match on "pizza" being present in literally every row.
+    private val matchStopWords = setOf(
+        "pizza", "the", "a", "an", "and", "with", "medium", "large", "small",
+        "regular", "of", "on", "for", "please"
+    )
+
+    private fun matchTokens(text: String): Set<String> =
+        text.lowercase()
+            .split(Regex("[^a-z0-9]+"))
+            .filter { it.length > 1 && it !in matchStopWords }
+            .toSet()
+
+    /**
+     * Scores each candidate by how many meaningful words it shares with
+     * [matchQuery] and returns the highest-scoring one (ties broken by
+     * on-screen reading order, since candidates are already sorted that
+     * way). Returns null if [matchQuery] is blank or nothing scores above
+     * zero, so callers can fall back to plain positional selection.
+     */
+    private fun bestScoringCandidate(candidates: List<ScreenElement>, matchQuery: String): ScreenElement? {
+        val queryTokens = matchTokens(matchQuery)
+        if (queryTokens.isEmpty()) return null
+
+        var best: ScreenElement? = null
+        var bestScore = 0
+        for (candidate in candidates) {
+            val labelTokens = matchTokens(candidate.label)
+            val score = queryTokens.count { it in labelTokens }
+            if (score > bestScore) {
+                bestScore = score
+                best = candidate
+            }
+        }
+        return best
+    }
+
     // ------------------------------------------------------------------
     // First real result after a search - see AutomationStep.ClickFirstResult
     // for why this exists instead of matching the typed query verbatim.
     // ------------------------------------------------------------------
-    private fun clickFirstResult(root: AccessibilityNodeInfo, excludeText: String, minYFraction: Float): Boolean {
+    private fun clickFirstResult(
+        root: AccessibilityNodeInfo,
+        excludeText: String,
+        minYFraction: Float,
+        matchQuery: String = ""
+    ): Boolean {
         visitBudget = maxVisits
         val raw = mutableListOf<ScreenElement>()
         collectClickables(root, depth = 0, raw)
@@ -446,10 +490,22 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             .filter { it.y >= cutoff }
             .filter { !(needle.isNotBlank() && it.label.equals(needle, ignoreCase = true)) }
 
+        // Among the candidates, prefer whichever one actually shares words
+        // with what was asked for ("peppy paneer" -> a "Peppy Paneer Pizza"
+        // row) instead of always grabbing whatever happens to sit first in
+        // the list - search results/recommendations aren't guaranteed to be
+        // sorted with the best match on top, so "first" and "right" are two
+        // different things. Only overrides positional order when something
+        // actually scores a real overlap; if nothing does (e.g. a video
+        // title sharing no words with the search phrase) this falls through
+        // to the old first-candidate behavior below rather than guessing.
+        val bestMatch = bestScoringCandidate(candidates, matchQuery)
+
         // Fall back to the excluded/near-top elements rather than doing
         // nothing if filtering left us with no candidates at all - a
         // slightly-wrong tap beats a flow that silently stalls.
-        val chosen = candidates.firstOrNull()
+        val chosen = bestMatch
+            ?: candidates.firstOrNull()
             ?: raw.sortedWith(compareBy({ it.y }, { it.x })).firstOrNull { it.y >= cutoff }
             ?: raw.firstOrNull()
             ?: return false
