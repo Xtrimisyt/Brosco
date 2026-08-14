@@ -235,6 +235,9 @@ object CommandProcessor {
                 WhatsAppAccessibilityService.runTask(listOf(AutomationStep.ClickText("next")), onUpdate = {})
                 speak("Skipping.")
             }
+            detectedIntent.type == IntentType.JIOSAAVN_MY_PLAYLIST -> {
+                runJioSaavnMyPlaylistFlow(context, speak, onPlaybackStarted)
+            }
             detectedIntent.type == IntentType.INSTAGRAM_SCROLL_FEED -> {
                 openApp(context, "instagram", speak)
                 WhatsAppAccessibilityService.runTask(
@@ -274,7 +277,28 @@ object CommandProcessor {
                 callContact(context, detectedIntent.target, speak)
             }
             detectedIntent.type == IntentType.ORDER_FOOD -> {
-                openZomatoSearch(context, detectedIntent.target, speak)
+                // A bare "order Y" (no app name) only reaches ORDER_FOOD
+                // instead of DOMINOS_ORDER/ZOMATO_ORDER because it doesn't
+                // repeat "dominos"/"zomato" - exactly what happens for the
+                // second half of "order X on dominos then order Y". That
+                // used to always fall through to a fresh Zomato web search,
+                // silently abandoning the Dominos cart X had just been added
+                // to. If we drove an order in the last few minutes, treat
+                // this the same as ADD_ITEM: go back to the menu of THAT
+                // app and add Y there instead of guessing a new one.
+                val recentOrderApp = lastOrderApp?.takeIf {
+                    System.currentTimeMillis() - lastOrderAt < ORDER_CONTEXT_WINDOW_MS
+                }
+                val cleaned = detectedIntent.target
+                    .replace(Regex("^order\\s+"), "")
+                    .replace(Regex("\\b(zomato|dominos|domino'?s)\\b"), "")
+                    .replace(Regex("\\b(on|from|via|please)\\b"), "")
+                    .trim()
+                when (recentOrderApp) {
+                    "dominos" -> runDominosFlow(context, cleaned, speak, alreadyOpen = true)
+                    "zomato" -> runZomatoFlow(context, cleaned, speak, alreadyOpen = true)
+                    else -> openZomatoSearch(context, detectedIntent.target, speak)
+                }
             }
             detectedIntent.type == IntentType.GO_BACK -> {
                 WhatsAppAccessibilityService.runTask(listOf(AutomationStep.GoBack), onUpdate = {})
@@ -779,6 +803,49 @@ object CommandProcessor {
             }
         )
         speak("Searching JioSaavn for $term.")
+    }
+
+    // ------------------------------------------------------------------
+    // Section 3: JioSaavn - "play my playlist" -> Library tab -> the
+    // playlist Shrey marked as his own -> play it, without needing a
+    // search term at all.
+    // ------------------------------------------------------------------
+    private fun runJioSaavnMyPlaylistFlow(
+        context: Context,
+        speak: (String) -> Unit,
+        onPlaybackStarted: () -> Unit = {}
+    ) {
+        openApp(context, "jiosaavn", speak)
+        WhatsAppAccessibilityService.runTask(
+            steps = listOf(
+                AutomationStep.WaitForPackage("com.jio.media.jiobeats"),
+                AutomationStep.Wait(700),
+                // Bottom nav tab - same screen as the search flow's Library
+                // shortcut, just a different starting tap.
+                AutomationStep.ClickText("Library"),
+                AutomationStep.Wait(800),
+                // Some layouts show a "Playlists" filter chip on the
+                // library screen before the actual playlist list; harmless
+                // no-op (skipped quickly) if this build goes straight there.
+                AutomationStep.ClickText("Playlists", optional = true),
+                AutomationStep.Wait(500),
+                // The actual playlist - matched fuzzily so "My Playlist",
+                // "my Playlist ❤️" or any custom name containing those two
+                // words still gets tapped.
+                AutomationStep.ClickText("My Playlist"),
+                AutomationStep.Wait(1200),
+                // Opening a playlist usually lands on its track list rather
+                // than auto-playing - tap Play/Shuffle if one's showing,
+                // same pattern as the paused-on-open JioSaavn search flow.
+                AutomationStep.ClickText("Play", exactMatch = false, optional = true)
+            ),
+            onUpdate = { speak(it) },
+            onDone = {
+                speak("Playing your playlist.")
+                onPlaybackStarted()
+            }
+        )
+        speak("Opening your playlist on JioSaavn.")
     }
 
     private fun parseSwipeDirection(target: String): SwipeDirection? {
