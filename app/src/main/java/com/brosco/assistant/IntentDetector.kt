@@ -32,6 +32,7 @@ enum class IntentType {
     JIOSAAVN_SEARCH,
     JIOSAAVN_PAUSE,
     JIOSAAVN_NEXT,
+    JIOSAAVN_MY_PLAYLIST,
     INSTAGRAM_SCROLL_FEED,
     INSTAGRAM_OPEN_REELS,
     INSTAGRAM_LIKE,
@@ -323,6 +324,17 @@ object IntentDetector {
             if (input.contains("next") || input.contains("skip")) return DetectedIntent(IntentType.SPOTIFY_NEXT)
             val query = input.replace("spotify", "").replace(Regex("play|search|find|song|on|open"), "").trim()
             if (query.isNotBlank()) return DetectedIntent(IntentType.SPOTIFY_SEARCH, query)
+        }
+
+        // --- JioSaavn: "my playlist" - the playlist Shrey has marked as his
+        // own (e.g. liked/favourited into a playlist called "My Playlist").
+        // Checked before the generic "play X on jiosaavn" regex below, since
+        // otherwise "play my playlist on jiosaavn" would get parsed as a
+        // literal search for the song title "my playlist" instead of
+        // opening the actual playlist. Also matches with no app name at all
+        // ("play my playlist") since JioSaavn is the only app this maps to.
+        if (input.contains("my playlist")) {
+            return DetectedIntent(IntentType.JIOSAAVN_MY_PLAYLIST)
         }
 
         // --- JioSaavn ---
