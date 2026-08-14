@@ -452,21 +452,38 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             .toSet()
 
     /**
-     * Scores each candidate by how many meaningful words it shares with
-     * [matchQuery] and returns the highest-scoring one (ties broken by
-     * on-screen reading order, since candidates are already sorted that
-     * way). Returns null if [matchQuery] is blank or nothing scores above
-     * zero, so callers can fall back to plain positional selection.
+     * Scores each candidate by how well it matches [matchQuery] and returns
+     * the highest-scoring one. Returns null if [matchQuery] is blank or
+     * nothing scores above zero, so callers can fall back to plain
+     * positional selection.
+     *
+     * Raw shared-word count alone isn't enough: a family/combo item's
+     * description often lists every other item on the menu by name (e.g. a
+     * "Big Big 6in1 Pizza" describing itself as containing "...Peppy Paneer,
+     * Farmhouse, Mexican Green Wave...") so it can share a word with the
+     * query by pure coincidence, tying - or even beating - the item actually
+     * being asked for. What actually distinguishes the right item is that
+     * the match shows up EARLY in its label, since a card's own name is
+     * always the first thing in its accessibility label, before any
+     * description/price/combo listing. So the position of the first
+     * matching word is weighted far more heavily than the raw count.
      */
     private fun bestScoringCandidate(candidates: List<ScreenElement>, matchQuery: String): ScreenElement? {
         val queryTokens = matchTokens(matchQuery)
         if (queryTokens.isEmpty()) return null
 
         var best: ScreenElement? = null
-        var bestScore = 0
+        var bestScore = 0.0
         for (candidate in candidates) {
-            val labelTokens = matchTokens(candidate.label)
-            val score = queryTokens.count { it in labelTokens }
+            val labelWords = candidate.label.lowercase().split(Regex("[^a-z0-9]+")).filter { it.isNotBlank() }
+            val labelTokens = labelWords.filter { it.length > 1 && it !in matchStopWords }.toSet()
+            val overlap = queryTokens.count { it in labelTokens }
+            if (overlap == 0) continue
+
+            val firstMatchIndex = labelWords.indexOfFirst { it in queryTokens }
+            val prominence = if (firstMatchIndex >= 0) 1.0 / (firstMatchIndex + 1) else 0.0
+            val score = overlap + prominence * 20.0
+
             if (score > bestScore) {
                 bestScore = score
                 best = candidate
