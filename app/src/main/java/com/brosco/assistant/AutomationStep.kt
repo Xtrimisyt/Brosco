@@ -50,17 +50,26 @@ sealed class AutomationStep {
     data class WaitForPackage(val packageName: String) : AutomationStep()
 
     /**
-     * After a search, taps the first real result in the list rather than
-     * the exact text that was typed. Matching the typed query verbatim
-     * against on-screen text is unreliable (a video/song title is rarely
-     * identical to the search phrase, and the still-visible search
+     * After a search, taps the best-matching result in the list rather than
+     * blindly the exact text that was typed. Matching the typed query
+     * verbatim against on-screen text is unreliable (a video/song title is
+     * rarely identical to the search phrase, and the still-visible search
      * suggestion that echoes the query gets tapped instead of an actual
-     * result). This instead scans top-to-bottom/left-to-right, skips the
-     * search bar/header area (roughly the top [minYFraction] of the
-     * screen), skips anything whose label matches [excludeText] (the
-     * suggestion row), and taps the first plausible result left over.
+     * result). This scans top-to-bottom/left-to-right, skips the search
+     * bar/header area (roughly the top [minYFraction] of the screen), skips
+     * anything whose label matches [excludeText] (the suggestion row), then
+     * - if [matchQuery] is given - scores the remaining candidates by word
+     * overlap with it and taps the best-scoring one instead of just the
+     * first. Falls back to the old "first plausible result" behavior if
+     * nothing scores a match (e.g. a video title that shares no words with
+     * the search phrase), so this never regresses the flows that relied on
+     * plain positional first-result tapping.
      */
-    data class ClickFirstResult(val excludeText: String = "", val minYFraction: Float = 0.14f) : AutomationStep()
+    data class ClickFirstResult(
+        val excludeText: String = "",
+        val minYFraction: Float = 0.14f,
+        val matchQuery: String = ""
+    ) : AutomationStep()
 
     /** Swipe across the screen in a direction. */
     data class Swipe(val direction: SwipeDirection) : AutomationStep()
