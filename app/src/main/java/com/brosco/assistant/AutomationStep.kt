@@ -89,7 +89,14 @@ sealed class AutomationStep {
 enum class SwipeDirection { UP, DOWN, LEFT, RIGHT }
 
 /** A tappable element currently on screen, captured for the AI-assisted "smart click" resolver. */
-data class ScreenElement(val index: Int, val label: String, val x: Float, val y: Float)
+data class ScreenElement(
+    val index: Int,
+    val label: String,
+    val x: Float,
+    val y: Float,
+    val width: Float = 0f,
+    val height: Float = 0f
+)
 
 /**
  * The most recent message bubble found in an open WhatsApp chat, captured
