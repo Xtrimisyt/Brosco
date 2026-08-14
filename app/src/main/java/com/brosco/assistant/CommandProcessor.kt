@@ -603,10 +603,15 @@ object CommandProcessor {
 
         val steps = mutableListOf<AutomationStep>()
         if (alreadyOpen) {
-            // Coming back from a previous item's cart screen - back out to
-            // the menu/search screen before searching for the next one.
-            steps += AutomationStep.GoBack
-            steps += AutomationStep.Wait(600)
+            // Coming back from the previous item's cart screen. A raw
+            // back-press from a cart/checkout screen in food-delivery apps
+            // often triggers an "are you sure you want to leave?" dialog
+            // instead of just navigating - which has no "Search" on it, so
+            // the whole next-item flow stalled with nothing to tap. Zomato's
+            // cart has its own "Add more items" link back to the menu for
+            // exactly this, so use that instead.
+            steps += AutomationStep.ClickText("Add more items", optional = true)
+            steps += AutomationStep.Wait(700)
         } else {
             openApp(context, "zomato", speak)
             steps += AutomationStep.WaitForPackage("com.application.zomato")
@@ -642,12 +647,13 @@ object CommandProcessor {
 
         val steps = mutableListOf<AutomationStep>()
         if (alreadyOpen) {
-            // We're most likely sitting on the cart screen from the item
-            // just added - back out to the menu before searching again so
-            // "then add X" lands a second item instead of hunting for it
-            // on the cart screen where it can't possibly be.
-            steps += AutomationStep.GoBack
-            steps += AutomationStep.Wait(600)
+            // Same reasoning as the Zomato flow above: Domino's cart screen
+            // has its own "Add more items" link (confirmed from the actual
+            // cart screen - see screenshot) - use that instead of a raw
+            // back-press, which risks landing on an exit-confirmation dialog
+            // with no "Search" on it for the next item to find.
+            steps += AutomationStep.ClickText("Add more items", optional = true)
+            steps += AutomationStep.Wait(700)
         } else {
             openApp(context, "dominos", speak)
             steps += AutomationStep.WaitForPackage("com.Dominos")
@@ -829,10 +835,16 @@ object CommandProcessor {
                 // no-op (skipped quickly) if this build goes straight there.
                 AutomationStep.ClickText("Playlists", optional = true),
                 AutomationStep.Wait(500),
-                // The actual playlist - matched fuzzily so "My Playlist",
-                // "my Playlist ❤️" or any custom name containing those two
-                // words still gets tapped.
-                AutomationStep.ClickText("My Playlist"),
+                // Your actual playlist has no text name of its own on this
+                // screen - just cover art, an emoji, and a song count (see
+                // the real Library screenshot) - so text-matching "My
+                // Playlist" was landing on the "My Playlists" TAB LABEL
+                // above it instead, since that's the first thing on screen
+                // containing those words. Tap by position instead: skip
+                // past the title/tabs/search bar/"Create Playlist" row
+                // (all sit above ~30% of the screen here) and take the
+                // first real playlist card below them.
+                AutomationStep.ClickFirstResult(minYFraction = 0.30f),
                 AutomationStep.Wait(1200),
                 // Opening a playlist usually lands on its track list rather
                 // than auto-playing - tap Play/Shuffle if one's showing,
