@@ -14,6 +14,14 @@ object GroqApiClient {
     private const val API_KEY = BuildConfig.GROQ_API_KEY
     private const val URL = "https://api.groq.com/openai/v1/chat/completions"
 
+    // llama-3.3-70b-versatile is deprecated on Groq (shutdown Aug 16, 2026).
+    // openai/gpt-oss-120b is Groq's official recommended replacement - free
+    // tier, faster inference, comparable or better quality. It's a reasoning
+    // model, so we pass include_reasoning=false everywhere below to keep the
+    // chain-of-thought out of message.content.
+    private const val CHAT_MODEL = "openai/gpt-oss-120b"
+    private const val SEARCH_MODEL = "groq/compound"
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -77,9 +85,11 @@ object GroqApiClient {
 
     fun classify(prompt: String): String {
         val body = JSONObject().apply {
-            put("model", "llama-3.3-70b-versatile")
+            put("model", CHAT_MODEL)
             put("max_tokens", 10)
             put("temperature", 0)
+            put("include_reasoning", false)
+            put("reasoning_effort", "low")
             put("messages", JSONArray().apply {
                 put(JSONObject().apply {
                     put("role", "system")
@@ -117,9 +127,11 @@ object GroqApiClient {
 
     fun extractFact(userText: String, assistantText: String): String {
         val body = JSONObject().apply {
-            put("model", "llama-3.3-70b-versatile")
+            put("model", CHAT_MODEL)
             put("max_tokens", 40)
             put("temperature", 0)
+            put("include_reasoning", false)
+            put("reasoning_effort", "low")
             put("messages", JSONArray().apply {
                 put(JSONObject().apply {
                     put("role", "system")
@@ -167,9 +179,11 @@ object GroqApiClient {
      */
     fun suggestReplies(incomingMessage: String): List<String> {
         val body = JSONObject().apply {
-            put("model", "llama-3.3-70b-versatile")
+            put("model", CHAT_MODEL)
             put("max_tokens", 120)
             put("temperature", 0.7)
+            put("include_reasoning", false)
+            put("reasoning_effort", "low")
             put("messages", JSONArray().apply {
                 put(JSONObject().apply {
                     put("role", "system")
@@ -222,7 +236,7 @@ object GroqApiClient {
         val lower = query.lowercase()
         val needsSearch = forceSearch || searchTriggers.any { lower.contains(it) }
 
-        val model = if (needsSearch) "groq/compound" else "llama-3.3-70b-versatile"
+        val model = if (needsSearch) SEARCH_MODEL else CHAT_MODEL
 
         val history = MemoryStore.recentHistory(context, maxTurns = 12)
         val facts = LearnedFacts.all(context)
@@ -271,6 +285,12 @@ object GroqApiClient {
         val body = JSONObject().apply {
             put("model", model)
             put("max_tokens", estimateMaxTokens(query, needsSearch))
+            if (!needsSearch) {
+                // reasoning params are only supported/relevant on the
+                // gpt-oss chat model, not on groq/compound
+                put("include_reasoning", false)
+                put("reasoning_effort", "low")
+            }
             put("messages", JSONArray().apply {
                 put(JSONObject().apply {
                     put("role", "system")
@@ -347,8 +367,10 @@ object GroqApiClient {
 
     private fun askFallbackNoSearch(context: Context, query: String): String {
         val body = JSONObject().apply {
-            put("model", "llama-3.3-70b-versatile")
+            put("model", CHAT_MODEL)
             put("max_tokens", 500)
+            put("include_reasoning", false)
+            put("reasoning_effort", "low")
             put("messages", JSONArray().apply {
                 put(JSONObject().apply {
                     put("role", "system")
