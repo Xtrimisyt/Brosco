@@ -166,7 +166,34 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
 
             override fun onEndOfSpeech() {}
 
-            override fun onPartialResults(partialResults: Bundle?) {}
+            // Waiting for onResults alone means waiting for the recognizer
+            // to decide the utterance is over via a silence gap - but while
+            // Brosco's own TTS is playing through the speaker, the mic never
+            // sees real silence (it's still hearing Brosco talk), so that
+            // gap often doesn't arrive until the whole reply has finished
+            // playing. By then "Brosco" (said mid-reply) is long past and
+            // usually buried under/blended with the TTS audio anyway. Partial
+            // results land continuously *during* the utterance, so checking
+            // them lets an interrupt attempt land the moment "Brosco" is
+            // transcribed instead of only after the response ends.
+            override fun onPartialResults(partialResults: Bundle?) {
+                try {
+                    if (!isSpeaking || expectingCommand) return
+                    val partial = partialResults
+                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        ?.firstOrNull()?.lowercase() ?: return
+                    if (wakeVariants.any { partial.contains(it) }) {
+                        tts?.stop()
+                        isSpeaking = false
+                        // Don't cancel/restart the session here - let it run
+                        // to a normal onResults so any command said in the
+                        // same breath ("Brosco, order pizza") still gets
+                        // captured and handled the usual way.
+                    }
+                } catch (e: Exception) {
+                    Log.e("Brosco", "onPartialResults crashed: ${e.message}", e)
+                }
+            }
 
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
@@ -230,6 +257,10 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
                         RecognizerIntent.EXTRA_CALLING_PACKAGE,
                         packageName
                     )
+                    // Needed for onPartialResults to fire at all - lets a
+                    // mid-reply "Brosco" interrupt be caught as it's heard
+                    // rather than only once the whole session ends.
+                    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 }
 
                 try {
