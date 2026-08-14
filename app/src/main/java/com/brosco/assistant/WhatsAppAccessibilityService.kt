@@ -300,7 +300,16 @@ class WhatsAppAccessibilityService : AccessibilityService() {
                     ?: node.className?.toString()?.substringAfterLast(".") ?: ""
 
                 if (label.isNotBlank()) {
-                    out.add(ScreenElement(0, label.take(60), bounds.centerX().toFloat(), bounds.centerY().toFloat()))
+                    out.add(
+                        ScreenElement(
+                            0,
+                            label.take(60),
+                            bounds.centerX().toFloat(),
+                            bounds.centerY().toFloat(),
+                            width = bounds.width().toFloat(),
+                            height = bounds.height().toFloat()
+                        )
+                    )
                 }
             }
         }
@@ -466,6 +475,39 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         return best
     }
 
+    // Overflow/kebab ("⋮") menu buttons almost always carry an accessibility
+    // label that either names the action itself ("More options", "Menu") or -
+    // even more treacherously - includes the row's own title so a screen
+    // reader can announce *which* row's menu it is ("More options for What
+    // Makes You Beautiful"). That second pattern is exactly what was making
+    // ClickFirstResult's word-overlap scoring pick the three-dot button over
+    // the actual song row: the button's label shares every word with the
+    // query, while the row itself may have no text/description of its own.
+    // These controls never represent something you'd actually want tapped
+    // as a "result", so they're excluded outright rather than merely scored.
+    private val overflowControlPhrases = listOf(
+        "more options", "options for", "song options", "overflow menu",
+        "context menu", "open menu", "show menu"
+    )
+
+    private fun isOverflowControlLabel(label: String): Boolean {
+        val l = label.trim().lowercase()
+        if (l.isBlank()) return false
+        if (l == "menu" || l == "options" || l == "more" || l == "…" || l == "⋮" || l == "...") return true
+        return overflowControlPhrases.any { l.contains(it) }
+    }
+
+    // Icon-only controls (overflow dots, share/heart/download glyphs) are
+    // small, roughly square touch targets - very different from a search
+    // result row, which spans most of the screen width. When at least one
+    // wider, row-shaped candidate exists, small square ones are dropped so
+    // an unlabeled icon can't outrank the actual content row it sits next to.
+    private fun isIconShaped(element: ScreenElement): Boolean {
+        val density = resources.displayMetrics.density
+        val iconMaxPx = 64 * density // ~64dp, generous for a tap target
+        return element.width in 1f..iconMaxPx && element.height in 1f..iconMaxPx
+    }
+
     // ------------------------------------------------------------------
     // First real result after a search - see AutomationStep.ClickFirstResult
     // for why this exists instead of matching the typed query verbatim.
@@ -485,27 +527,37 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         val cutoff = screenHeight * minYFraction
         val needle = excludeText.trim()
 
-        val candidates = raw
+        val belowCutoff = raw
             .sortedWith(compareBy({ it.y }, { it.x }))
             .filter { it.y >= cutoff }
-            .filter { !(needle.isNotBlank() && it.label.equals(needle, ignoreCase = true)) }
+            .filter { !isOverflowControlLabel(it.label) }
 
-        // Among the candidates, prefer whichever one actually shares words
-        // with what was asked for ("peppy paneer" -> a "Peppy Paneer Pizza"
-        // row) instead of always grabbing whatever happens to sit first in
-        // the list - search results/recommendations aren't guaranteed to be
-        // sorted with the best match on top, so "first" and "right" are two
-        // different things. Only overrides positional order when something
-        // actually scores a real overlap; if nothing does (e.g. a video
-        // title sharing no words with the search phrase) this falls through
-        // to the old first-candidate behavior below rather than guessing.
-        val bestMatch = bestScoringCandidate(candidates, matchQuery)
+        // Icon-shaped controls (overflow dots, share/heart glyphs) are
+        // dropped when a wider, row-shaped candidate exists - but if that
+        // leaves nothing at all, fall back to the unfiltered set rather than
+        // stalling the flow.
+        val hasWideCandidate = belowCutoff.any { !isIconShaped(it) }
+        val shaped = if (hasWideCandidate) belowCutoff.filterNot { isIconShaped(it) } else belowCutoff
+
+        // Score BEFORE stripping the "echo" of the typed query - a result
+        // whose displayed name matches the query almost verbatim (e.g.
+        // ordering "margherita pizza" and the menu literally has a
+        // "Margherita Pizza" item) is the *strongest* possible signal that
+        // it's the right one, not a reason to exclude it. The exact-text
+        // exclusion below only exists to skip a genuine search-suggestion
+        // echo, so it's now only applied as a last resort when content
+        // scoring couldn't find anything to prefer.
+        val bestMatch = bestScoringCandidate(shaped, matchQuery)
+
+        val candidates = shaped
+            .filter { !(needle.isNotBlank() && it.label.equals(needle, ignoreCase = true)) }
 
         // Fall back to the excluded/near-top elements rather than doing
         // nothing if filtering left us with no candidates at all - a
         // slightly-wrong tap beats a flow that silently stalls.
         val chosen = bestMatch
             ?: candidates.firstOrNull()
+            ?: shaped.firstOrNull()
             ?: raw.sortedWith(compareBy({ it.y }, { it.x })).firstOrNull { it.y >= cutoff }
             ?: raw.firstOrNull()
             ?: return false
