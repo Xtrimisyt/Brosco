@@ -20,7 +20,19 @@ sealed class AutomationStep {
      * timeout - for "tap this if it's there" cases like a Play button that
      * may or may not be showing depending on app state.
      */
-    data class ClickText(val text: String, val exactMatch: Boolean = false, val optional: Boolean = false) : AutomationStep()
+    data class ClickText(
+        val text: String,
+        val exactMatch: Boolean = false,
+        val optional: Boolean = false,
+        // Restricts matching to nodes at or below this fraction of screen
+        // height (0 = top, 1 = bottom). Use ~0.8 for bottom-nav tabs like
+        // "Search" so a decorative/disabled element with the same label
+        // higher up the screen (a header icon, an ad, a PRO upsell banner)
+        // can't get matched instead of the actual tappable tab - which is
+        // exactly the kind of thing an app redesign (new PRO branding,
+        // extra promo rows) tends to introduce.
+        val minYFraction: Float = 0f
+    ) : AutomationStep()
 
     /** Tap a node by its Android view id, e.g. "com.whatsapp:id/send". */
     data class ClickId(val viewId: String) : AutomationStep()
