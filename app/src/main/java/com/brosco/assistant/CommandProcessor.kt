@@ -926,16 +926,20 @@ object CommandProcessor {
                 // no-op (skipped quickly) if this build goes straight there.
                 AutomationStep.ClickText("Playlists", optional = true),
                 AutomationStep.Wait(500),
-                // Your actual playlist has no text name of its own on this
-                // screen - just cover art, an emoji, and a song count (see
-                // the real Library screenshot) - so text-matching "My
-                // Playlist" was landing on the "My Playlists" TAB LABEL
-                // above it instead, since that's the first thing on screen
-                // containing those words. Tap by position instead: skip
-                // past the title/tabs/search bar/"Create Playlist" row
-                // (all sit above ~30% of the screen here) and take the
-                // first real playlist card below them.
-                AutomationStep.ClickFirstResult(minYFraction = 0.30f),
+                // "Create Playlist" was slipping through the exclusion-by-
+                // label check: its actual clickable node very likely has no
+                // text of its own (icon + a separate "Create Playlist"
+                // TextView next to it), the exact same shape that was
+                // breaking the Domino's/Zomato item matching - so a filter
+                // that only looks at the CLICKED node's own label never saw
+                // it. Fixed the same way: match POSITIVELY for something
+                // only a real playlist card has - every playlist row shows
+                // a song count ("15 Songs"), and "Create Playlist" never
+                // does. Scoring against "songs"/"tracks" finds that text
+                // and taps its nearest clickable ancestor (the actual
+                // card), which can't land on Create Playlist even if its
+                // hitbox overlaps the cutoff line.
+                AutomationStep.ClickFirstResult(minYFraction = 0.30f, matchQuery = "songs tracks"),
                 AutomationStep.Wait(1200),
                 // Opening a playlist usually lands on its track list rather
                 // than auto-playing - tap Play/Shuffle if one's showing,
