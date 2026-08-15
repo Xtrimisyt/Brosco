@@ -125,6 +125,7 @@ object CommandProcessor {
             detectedIntent.type == IntentType.CLEAR_MEMORY -> {
                 MemoryStore.clear(context)
                 LearnedFacts.clear(context)
+                UsageStats.clear(context)
                 speak("Done - I've forgotten everything up to now.")
             }
 
@@ -698,13 +699,12 @@ object CommandProcessor {
         }
         steps += listOf(
             AutomationStep.ClickText("Search"),
-            AutomationStep.Wait(500),
+            AutomationStep.Wait(200),
             AutomationStep.TypeText(query),
-            AutomationStep.Wait(1600),
             AutomationStep.ClickFirstResult(excludeText = query, matchQuery = query),
-            AutomationStep.Wait(1600),
+            AutomationStep.Wait(300),
             AutomationStep.ClickText("Add"),
-            AutomationStep.Wait(700),
+            AutomationStep.Wait(300),
             // Opening the cart view is a nice-to-have, not the point of the
             // flow - the item is already added by the time this runs, so a
             // missing/renamed "View Cart" button shouldn't make the whole
@@ -715,7 +715,12 @@ object CommandProcessor {
         WhatsAppAccessibilityService.runTask(
             steps = steps,
             onUpdate = { speak(it) },
-            onDone = { speak("$query is in your cart - take a look and confirm the order.") },
+            onDone = {
+                speak("$query is in your cart - take a look and confirm the order.")
+                UsageStats.recordAndMaybeLearn(context, "zomato", query) { t ->
+                    "Frequently orders \"$t\" on Zomato."
+                }
+            },
             onFail = { speak("I couldn't finish adding $query on Zomato - the app may have changed screens or nothing matched that name. Take a look and try again.") }
         )
         speak("Searching for $query on Zomato.")
@@ -745,25 +750,29 @@ object CommandProcessor {
         }
         steps += listOf(
             AutomationStep.ClickText("Search"),
-            AutomationStep.Wait(500),
+            AutomationStep.Wait(200),
             AutomationStep.TypeText(query),
-            AutomationStep.Wait(1600),
             AutomationStep.ClickFirstResult(excludeText = query, matchQuery = query),
-            AutomationStep.Wait(1400),
+            AutomationStep.Wait(300),
             // Not every item has a size picker (sides, garlic bread,
             // beverages don't) - marking this optional stops a 5s timeout +
             // false "failed" report on every non-pizza item.
             AutomationStep.ClickText("Medium", optional = true),
-            AutomationStep.Wait(700),
+            AutomationStep.Wait(300),
             AutomationStep.ClickText("Add"),
-            AutomationStep.Wait(700),
+            AutomationStep.Wait(300),
             AutomationStep.ClickText("Cart", optional = true)
         )
 
         WhatsAppAccessibilityService.runTask(
             steps = steps,
             onUpdate = { speak(it) },
-            onDone = { speak("$query is in the cart - medium size, change it there if you want something else.") },
+            onDone = {
+                speak("$query is in the cart - medium size, change it there if you want something else.")
+                UsageStats.recordAndMaybeLearn(context, "dominos", query) { t ->
+                    "Frequently orders \"$t\" on Domino's."
+                }
+            },
             onFail = { speak("I couldn't finish adding $query on Domino's - the app may have changed screens or nothing matched that name. Take a look and try again.") }
         )
         speak("Looking for $query on Domino's.")
@@ -787,14 +796,17 @@ object CommandProcessor {
         WhatsAppAccessibilityService.runTask(
             steps = listOf(
                 AutomationStep.WaitForPackage("com.google.android.youtube"),
-                AutomationStep.Wait(700),
+                AutomationStep.Wait(300),
+                // NOTE: YouTube's Search is a top app-bar icon, not a
+                // bottom-nav tab, so (unlike Saavn/Spotify below) this one
+                // deliberately isn't position-gated.
                 AutomationStep.ClickText("Search"),
-                AutomationStep.Wait(500),
-                // TypeText already submits via IME "search"/enter, so by the
-                // time this wait elapses we should be on the results screen,
-                // not still showing search suggestions.
+                AutomationStep.Wait(200),
+                // TypeText already submits via IME "search"/enter.
+                // ClickFirstResult below retries on its own until the
+                // results screen actually has something to tap, so no fixed
+                // wait is needed here either.
                 AutomationStep.TypeText(term),
-                AutomationStep.Wait(2000),
                 // Tap the first actual result thumbnail/row rather than
                 // matching the typed text - a video's title is almost never
                 // identical to the search phrase, so the old exact-ish text
@@ -831,16 +843,18 @@ object CommandProcessor {
         WhatsAppAccessibilityService.runTask(
             steps = listOf(
                 AutomationStep.WaitForPackage("com.spotify.music"),
-                AutomationStep.Wait(700),
-                AutomationStep.ClickText("Search"),
-                AutomationStep.Wait(500),
+                AutomationStep.Wait(300),
+                AutomationStep.ClickText("Search", minYFraction = 0.7f),
+                AutomationStep.Wait(200),
                 AutomationStep.TypeText(term),
-                AutomationStep.Wait(1800),
                 AutomationStep.ClickFirstResult(excludeText = term, matchQuery = term)
             ),
             onUpdate = { speak(it) },
             onDone = {
                 speak("Playing $term.")
+                UsageStats.recordAndMaybeLearn(context, "spotify", term) { t ->
+                    "Frequently plays \"$t\" on Spotify."
+                }
                 onPlaybackStarted()
             },
             onFail = { speak("Couldn't find \"$term\" on Spotify - the app may still be loading, or nothing matched that name.") }
@@ -870,25 +884,44 @@ object CommandProcessor {
                 // tapped and the whole flow quietly did nothing - wait for
                 // its window to actually be the foreground one first.
                 AutomationStep.WaitForPackage("com.jio.media.jiobeats"),
-                AutomationStep.Wait(700),
-                AutomationStep.ClickText("Search"),
-                AutomationStep.Wait(500),
+                // ClickText/TypeText/ClickFirstResult all retry every tick
+                // (now 90ms) until they land or hit their own 5s timeout -
+                // that retry loop already covers "the app is still loading",
+                // so the fixed Wait()s that used to sit between these steps
+                // were pure dead time layered on top of it, not something
+                // that made the flow more reliable. Trimmed to small
+                // settle-time pauses only.
+                //
+                // The "Search" tap is now also restricted to the bottom
+                // ~30% of the screen (minYFraction) so it can only match the
+                // actual bottom-nav Search tab, not a same-labelled element
+                // higher up the screen. That distinction didn't matter on
+                // the old JioSaavn layout, but the current "PRO" redesign
+                // adds extra promo/branding rows above the fold - if any of
+                // those happen to carry "Search" text or a content
+                // description containing it, the old unrestricted match
+                // could land on that instead of the real tab and the whole
+                // flow would silently go nowhere, which matches "it can't
+                // search now, but it used to work."
+                AutomationStep.Wait(300),
+                AutomationStep.ClickText("Search", minYFraction = 0.7f),
+                AutomationStep.Wait(200),
                 AutomationStep.TypeText(term),
-                AutomationStep.Wait(1800),
                 AutomationStep.ClickFirstResult(excludeText = term, matchQuery = term),
                 // JioSaavn (unlike YouTube) usually opens the song on the
                 // player screen PAUSED rather than auto-playing it - that's
-                // the "I have to manually click it" bug. Give the player a
-                // moment to load, then tap the Play button if one's showing.
-                // Marked optional so if it already started playing (no Play
-                // button to find, it'll show Pause instead) this just gets
-                // skipped quickly instead of stalling the flow.
-                AutomationStep.Wait(900),
+                // the "I have to manually click it" bug. Tap the Play button
+                // if one's showing. Marked optional so if it already started
+                // playing (no Play button to find, it'll show Pause instead)
+                // this just gets skipped quickly instead of stalling the flow.
                 AutomationStep.ClickText("Play", exactMatch = true, optional = true)
             ),
             onUpdate = { speak(it) },
             onDone = {
                 speak("Playing $term.")
+                UsageStats.recordAndMaybeLearn(context, "jiosaavn", term) { t ->
+                    "Frequently plays \"$t\" on JioSaavn."
+                }
                 // "Turn itself off" once the song is actually playing -
                 // both always-listen (foreground) and background Brosco
                 // repeatedly grab audio focus every listening cycle, which
@@ -916,11 +949,12 @@ object CommandProcessor {
         WhatsAppAccessibilityService.runTask(
             steps = listOf(
                 AutomationStep.WaitForPackage("com.jio.media.jiobeats"),
-                AutomationStep.Wait(700),
+                AutomationStep.Wait(300),
                 // Bottom nav tab - same screen as the search flow's Library
-                // shortcut, just a different starting tap.
-                AutomationStep.ClickText("Library"),
-                AutomationStep.Wait(800),
+                // shortcut, just a different starting tap. Position-gated
+                // for the same reason as the Search tab above.
+                AutomationStep.ClickText("Library", minYFraction = 0.7f),
+                AutomationStep.Wait(300),
                 // Some layouts show a "Playlists" filter chip on the
                 // library screen before the actual playlist list; harmless
                 // no-op (skipped quickly) if this build goes straight there.
