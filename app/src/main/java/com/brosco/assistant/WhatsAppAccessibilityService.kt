@@ -7,6 +7,7 @@ import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
@@ -51,7 +52,14 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         private var currentStepStartedAt = 0L
         private var currentStepAttempts = 0
 
-        private const val TICK_MS = 150L
+        // Was 150ms. ClickText/ClickFirstResult/TypeText all already retry
+        // every tick until they land or their own timeout expires - so this
+        // interval is the main thing standing between "found it" and "tapped
+        // it" on every step of every flow. Halving it makes every automation
+        // (Saavn, Spotify, YouTube, WhatsApp, food orders) visibly snappier
+        // for free, since 90ms is still well inside a comfortable per-tick
+        // budget (tickBudgetMs below caps each tick's own work at 120ms).
+        private const val TICK_MS = 90L
         private const val STEP_TIMEOUT_MS = 5000L
         private const val MAX_STALL_TICKS = 30
 
@@ -160,6 +168,28 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    // The ticker used to run on mainHandler. That's the piece the earlier
+    // fixes (global exception handler, tickBudgetMs, wake lock timeout)
+    // didn't cover: node-tree calls like node.getChild()/node.text/
+    // findAccessibilityNodeInfosByViewId are Binder IPC calls into ANOTHER
+    // app's process. tickBudgetMs only checks the clock BETWEEN calls - it
+    // can't preempt one already in flight. If the foreground app is slow,
+    // busy, or under memory pressure, a single call can block far past
+    // 120ms with nothing on our side able to interrupt it. Do that on the
+    // main thread and Android's accessibility-responsiveness watchdog (this
+    // is tracked separately from - and doesn't require - a full app ANR)
+    // can flag the service as unresponsive and disable it: exactly the
+    // silent, no-crash, "have to toggle it back on" pattern being reported,
+    // as opposed to a visible crash/force-close.
+    //
+    // AccessibilityNodeInfo access and service calls like performAction /
+    // dispatchGesture are safe to make from a background thread, so the fix
+    // is simply: run the ticker there instead. Worst case a node query now
+    // stalls a throwaway background thread instead of the one thread the
+    // whole system depends on to consider the app "responding".
+    private val tickerThread = HandlerThread("BrocoTicker").apply { start() }
+    private val tickerHandler = Handler(tickerThread.looper)
     private var alive = false
     private var wakeLock: PowerManager.WakeLock? = null
 
@@ -228,7 +258,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             } catch (e: Exception) {
                 Log.e("Brosco", "Tick failed: ${e.message}")
             }
-            if (alive) mainHandler.postDelayed(this, TICK_MS)
+            if (alive) tickerHandler.postDelayed(this, TICK_MS)
         }
     }
 
@@ -236,15 +266,16 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         alive = true
-        mainHandler.removeCallbacks(ticker)
-        mainHandler.post(ticker)
+        tickerHandler.removeCallbacks(ticker)
+        tickerHandler.post(ticker)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         alive = false
         if (instance === this) instance = null
-        mainHandler.removeCallbacks(ticker)
+        tickerHandler.removeCallbacks(ticker)
+        tickerThread.quitSafely()
         releaseTaskWakeLock()
     }
 
@@ -253,6 +284,22 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
 
     override fun onInterrupt() {}
+
+    // Callers of runTask() (CommandProcessor's speak/UI-update closures)
+    // were written assuming they'd fire on the main thread, same as
+    // everything else in the app. Now that the ticker itself runs on
+    // tickerHandler's background thread, hop back to the main thread before
+    // invoking them rather than assuming TTS/UI code downstream is safe to
+    // call from anywhere.
+    private fun notifyMain(block: () -> Unit) {
+        mainHandler.post {
+            try {
+                block()
+            } catch (e: Exception) {
+                Log.e("Brosco", "Task callback failed: ${e.message}")
+            }
+        }
+    }
 
     // ------------------------------------------------------------------
     // Ticker: one step of the queue per tick, retried until it works or
@@ -278,7 +325,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
                     startActivity(launch)
                     success = true
                 } else {
-                    onTaskUpdate?.invoke("That app doesn't seem to be installed.")
+                    onTaskUpdate?.let { cb -> notifyMain { cb("That app doesn't seem to be installed.") } }
                     success = false
                     abandon = true
                 }
@@ -287,7 +334,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
                 success = root != null && typeIntoEditableField(root, step.text)
             }
             is AutomationStep.ClickText -> {
-                success = root != null && clickByTextFuzzy(root, step.text, step.exactMatch)
+                success = root != null && clickByTextFuzzy(root, step.text, step.exactMatch, step.minYFraction)
             }
             is AutomationStep.ClickId -> {
                 success = root != null && clickById(root, step.viewId)
@@ -326,7 +373,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
                 success = performGlobalAction(GLOBAL_ACTION_HOME)
             }
             is AutomationStep.Speak -> {
-                onTaskUpdate?.invoke(step.text)
+                onTaskUpdate?.let { cb -> notifyMain { cb(step.text) } }
                 success = true
             }
         }
@@ -357,7 +404,11 @@ class WhatsAppAccessibilityService : AccessibilityService() {
 
     private fun finishTask() {
         releaseTaskWakeLock()
-        if (hadStepFailure) onTaskFail?.invoke() else onTaskDone?.invoke()
+        if (hadStepFailure) {
+            onTaskFail?.let { cb -> notifyMain { cb() } }
+        } else {
+            onTaskDone?.let { cb -> notifyMain { cb() } }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -790,10 +841,21 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     // ------------------------------------------------------------------
     // Click by text ("contains", forgiving of extra words on real UIs)
     // ------------------------------------------------------------------
-    private fun clickByTextFuzzy(root: AccessibilityNodeInfo, target: String, exact: Boolean): Boolean {
+    private fun clickByTextFuzzy(
+        root: AccessibilityNodeInfo,
+        target: String,
+        exact: Boolean,
+        minYFraction: Float = 0f
+    ): Boolean {
         visitBudget = maxVisits
-        val match = findNodeByText(root, target, exact, depth = 0) ?: return false
+        val match = findNodeByText(root, target, exact, depth = 0, minYFraction = minYFraction) ?: return false
         return clickNodeOrAncestor(match)
+    }
+
+    private fun screenHeight(): Int {
+        val bounds = Rect()
+        (rootInActiveWindow ?: return Int.MAX_VALUE).getBoundsInScreen(bounds)
+        return if (bounds.height() > 0) bounds.height() else Int.MAX_VALUE
     }
 
     private fun clickById(root: AccessibilityNodeInfo, id: String): Boolean {
@@ -809,7 +871,8 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         node: AccessibilityNodeInfo?,
         target: String,
         exact: Boolean,
-        depth: Int
+        depth: Int,
+        minYFraction: Float = 0f
     ): AccessibilityNodeInfo? {
         if (node == null || depth > 40 || !withinBudget()) return null
         visitBudget--
@@ -817,15 +880,24 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         val nodeText = node.text?.toString()
         val nodeDesc = node.contentDescription?.toString()
 
-        val hit = if (exact) {
+        var hit = if (exact) {
             (nodeText.equals(target, ignoreCase = true) || nodeDesc.equals(target, ignoreCase = true)) && !node.isEditable
         } else {
             fuzzyMatch(nodeText, nodeDesc, target) && !node.isEditable
         }
+
+        if (hit && minYFraction > 0f) {
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            val height = screenHeight()
+            if (height > 0 && height != Int.MAX_VALUE && bounds.centerY().toFloat() / height < minYFraction) {
+                hit = false
+            }
+        }
         if (hit) return node
 
         for (i in 0 until node.childCount) {
-            val found = findNodeByText(node.getChild(i), target, exact, depth + 1)
+            val found = findNodeByText(node.getChild(i), target, exact, depth + 1, minYFraction)
             if (found != null) return found
         }
         return null
