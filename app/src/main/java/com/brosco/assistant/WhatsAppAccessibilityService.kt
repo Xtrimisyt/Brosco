@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -34,6 +35,18 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         private val taskQueue = ArrayDeque<AutomationStep>()
         private var onTaskUpdate: ((String) -> Unit)? = null
         private var onTaskDone: (() -> Unit)? = null
+        private var onTaskFail: (() -> Unit)? = null
+
+        // Set the moment ANY non-optional step gets abandoned (times out /
+        // exhausts its retries) during the current task. Used to tell a
+        // flow's real outcome apart from a hollow "done" - without this,
+        // runTask() called onTaskDone unconditionally once the queue drained,
+        // whether every step actually landed or every single one silently
+        // failed and just got skipped. That's the core of "it fails
+        // silently": the user would hear "Farmhouse is in the cart" (or
+        // nothing at all, if even the FIRST speak() never got scheduled)
+        // with nothing having actually happened on screen.
+        private var hadStepFailure = false
 
         private var currentStepStartedAt = 0L
         private var currentStepAttempts = 0
@@ -50,18 +63,47 @@ class WhatsAppAccessibilityService : AccessibilityService() {
          * just a one-item list; a whole flow ("search burger -> add to cart
          * -> open cart") is a longer one. Calling this again while a task is
          * still running replaces it - the newest command always wins.
+         *
+         * [onFail] fires instead of [onDone] if any required (non-optional)
+         * step in the flow had to be abandoned - e.g. "Search" was never
+         * found because the app hadn't finished loading, or the item never
+         * matched anything on screen. Callers should use this to speak an
+         * honest "that didn't work" instead of only ever having a single
+         * "success" message that fires no matter what actually happened.
+         *
+         * If the Accessibility Service itself isn't connected (toggled off
+         * in Settings, or killed and not yet reconnected), the task is
+         * refused outright and [onFail] fires immediately via [onUpdate] -
+         * previously this silently queued steps nothing was ever going to
+         * process, since the ticker that drains the queue only runs on a
+         * live service instance.
          */
-        fun runTask(steps: List<AutomationStep>, onUpdate: (String) -> Unit, onDone: () -> Unit = {}) {
+        fun runTask(
+            steps: List<AutomationStep>,
+            onUpdate: (String) -> Unit,
+            onDone: () -> Unit = {},
+            onFail: () -> Unit = {}
+        ) {
+            if (instance == null) {
+                Log.w("Brosco", "runTask called with no connected accessibility service")
+                onUpdate("I can't tap anything on screen right now - Brosco's Accessibility Service looks like it's off. Turn it back on in Settings and try again.")
+                onFail()
+                return
+            }
             taskQueue.clear()
             taskQueue.addAll(steps)
             onTaskUpdate = onUpdate
             onTaskDone = onDone
+            onTaskFail = onFail
+            hadStepFailure = false
             currentStepAttempts = 0
             currentStepStartedAt = System.currentTimeMillis()
+            instance?.acquireTaskWakeLock()
         }
 
         fun cancelTask() {
             taskQueue.clear()
+            instance?.releaseTaskWakeLock()
         }
 
         fun isTaskRunning(): Boolean = taskQueue.isNotEmpty()
@@ -119,6 +161,40 @@ class WhatsAppAccessibilityService : AccessibilityService() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var alive = false
+    private var wakeLock: PowerManager.WakeLock? = null
+
+    // Automations that open a fresh app (order flows, music search) take
+    // several seconds of typing/waiting/tapping - long enough that if the
+    // screen is off or the device has gone into Doze, the OS can throttle
+    // the Handler ticks driving this ticker and the flow just stalls
+    // partway through with nothing to show for it. That's the "background
+    // Brosco fails silently" report: it's most visible on exactly these
+    // longer flows, not quick single taps. Holding a short partial wake
+    // lock for the duration of a task keeps the CPU awake so the ticker
+    // actually keeps firing. Capped hard at 30s (not tied to task length)
+    // so a stuck/never-finishing task can never hold it indefinitely and
+    // drain the battery - it always self-releases even if release() is
+    // somehow never called.
+    private fun acquireTaskWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) return
+            val pm = getSystemService(POWER_SERVICE) as? PowerManager ?: return
+            val lock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Brosco:AutomationTask")
+            lock.setReferenceCounted(false)
+            lock.acquire(30_000L)
+            wakeLock = lock
+        } catch (e: Exception) {
+            Log.e("Brosco", "acquireTaskWakeLock failed: ${e.message}")
+        }
+    }
+
+    private fun releaseTaskWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        } catch (e: Exception) {
+            Log.e("Brosco", "releaseTaskWakeLock failed: ${e.message}")
+        }
+    }
 
     // Bounded-search budget shared by the tree-walking helpers below, reset
     // before each top-level search so one slow tick can't stall the ticker
@@ -169,6 +245,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         alive = false
         if (instance === this) instance = null
         mainHandler.removeCallbacks(ticker)
+        releaseTaskWakeLock()
     }
 
     // Deliberately near-empty: all real work happens in the ticker so this
@@ -260,15 +337,27 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             taskQueue.removeFirstOrNull()
             currentStepAttempts = 0
             currentStepStartedAt = System.currentTimeMillis()
-            if (taskQueue.isEmpty()) onTaskDone?.invoke()
+            if (taskQueue.isEmpty()) finishTask()
         } else if (abandon || elapsed > effectiveTimeoutMs(step) || currentStepAttempts > MAX_STALL_TICKS) {
             Log.w("Brosco", "Giving up on step $step after $currentStepAttempts attempts")
+            // Optional steps (a "Play" button that may already be gone
+            // because playback auto-started, a "Playlists" filter chip that
+            // might not exist on this layout) are EXPECTED to sometimes
+            // find nothing - that's not a broken flow, so only REQUIRED
+            // steps failing counts as a real failure worth reporting.
+            val isOptionalStep = step is AutomationStep.ClickText && step.optional
+            if (!isOptionalStep) hadStepFailure = true
             taskQueue.removeFirstOrNull()
             currentStepAttempts = 0
             currentStepStartedAt = System.currentTimeMillis()
-            if (taskQueue.isEmpty()) onTaskDone?.invoke()
+            if (taskQueue.isEmpty()) finishTask()
         }
         // else: leave it at the front, next tick (150ms) retries automatically
+    }
+
+    private fun finishTask() {
+        releaseTaskWakeLock()
+        if (hadStepFailure) onTaskFail?.invoke() else onTaskDone?.invoke()
     }
 
     // ------------------------------------------------------------------
@@ -316,6 +405,47 @@ class WhatsAppAccessibilityService : AccessibilityService() {
 
         for (i in 0 until node.childCount) {
             collectClickables(node.getChild(i), depth + 1, out)
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Every node carrying its own visible text, clickable or not - used to
+    // find a card's TITLE for matching purposes. collectClickables alone
+    // isn't enough for this: a product card is very often a plain TextView
+    // ("Farmhouse") sitting next to a separately-clickable "Add" button or
+    // wrapped by a row container, and NEITHER of those clickable nodes
+    // reliably carries the item's own name as its accessibility label (the
+    // button just says "Add", the row container frequently has no
+    // text/contentDescription of its own at all). Matching against titles
+    // like this and then walking up to whatever's actually clickable (see
+    // clickNodeOrAncestor) is what makes "add farmhouse" land on the
+    // Farmhouse card instead of the first result / whichever other card
+    // happens to mention "farmhouse" in its own description text.
+    // ------------------------------------------------------------------
+    private fun collectTextElements(node: AccessibilityNodeInfo?, depth: Int, out: MutableList<ScreenElement>) {
+        if (node == null || depth > 40 || !withinBudget()) return
+        visitBudget--
+
+        val text = node.text?.toString()?.trim()
+        if (!text.isNullOrBlank() && node.isVisibleToUser) {
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            if (!bounds.isEmpty) {
+                out.add(
+                    ScreenElement(
+                        0,
+                        text.take(120),
+                        bounds.centerX().toFloat(),
+                        bounds.centerY().toFloat(),
+                        width = bounds.width().toFloat(),
+                        height = bounds.height().toFloat()
+                    )
+                )
+            }
+        }
+
+        for (i in 0 until node.childCount) {
+            collectTextElements(node.getChild(i), depth + 1, out)
         }
     }
 
@@ -514,6 +644,24 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         return overflowControlPhrases.any { l.contains(it) }
     }
 
+    // Screen furniture that sits ABOVE the real results/list on a library or
+    // search screen and can otherwise get scooped up by position-based
+    // fallback matching - e.g. "Create Playlist" on JioSaavn's Library tab,
+    // which sits right above the user's actual playlists and was winning
+    // the tap instead of the playlist itself. minYFraction is the first line
+    // of defence against this; this is the second, name-based one, since
+    // relying on position alone assumes the control's actual touch target
+    // never extends lower than its visible text/icon - not guaranteed.
+    private val nonResultControlPhrases = listOf(
+        "create playlist", "create a playlist", "new playlist"
+    )
+
+    private fun isNonResultControlLabel(label: String): Boolean {
+        val l = label.trim().lowercase()
+        if (l.isBlank()) return false
+        return nonResultControlPhrases.any { l.contains(it) }
+    }
+
     // Icon-only controls (overflow dots, share/heart/download glyphs) are
     // small, roughly square touch targets - very different from a search
     // result row, which spans most of the screen width. When at least one
@@ -544,10 +692,46 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         val cutoff = screenHeight * minYFraction
         val needle = excludeText.trim()
 
+        // ---- Title-first pass ----
+        // Try matching the query against every visible piece of TEXT on
+        // screen (not just clickable nodes) before falling back to
+        // clickable-only scoring below. This is what actually finds "the
+        // Farmhouse card" rather than "whatever's clickable and happens to
+        // score non-zero" - see collectTextElements for why the clickable
+        // nodes alone (bare "Add" buttons, unlabeled row containers) can't
+        // be trusted to carry the item's own name.
+        if (matchQuery.isNotBlank()) {
+            visitBudget = maxVisits
+            val textRaw = mutableListOf<ScreenElement>()
+            collectTextElements(root, depth = 0, textRaw)
+            val titleCandidates = textRaw
+                .filter { it.y >= cutoff }
+                .filter { !isOverflowControlLabel(it.label) }
+                .filter { !isNonResultControlLabel(it.label) }
+                .filter { !(needle.isNotBlank() && it.label.equals(needle, ignoreCase = true)) }
+            val titleMatch = bestScoringCandidate(titleCandidates, matchQuery)
+            if (titleMatch != null) {
+                visitBudget = maxVisits
+                val titleNode = findByPredicate(root, depth = 0) {
+                    val bounds = Rect()
+                    it.getBoundsInScreen(bounds)
+                    !bounds.isEmpty &&
+                        bounds.centerX().toFloat() == titleMatch.x &&
+                        bounds.centerY().toFloat() == titleMatch.y &&
+                        it.text?.toString()?.trim() == titleMatch.label
+                }
+                val tapped = if (titleNode != null) clickNodeOrAncestor(titleNode)
+                             else dispatchTap(titleMatch.x, titleMatch.y, holdMs = 60)
+                if (tapped) return true
+                // fall through to the old logic below if the tap itself failed
+            }
+        }
+
         val belowCutoff = raw
             .sortedWith(compareBy({ it.y }, { it.x }))
             .filter { it.y >= cutoff }
             .filter { !isOverflowControlLabel(it.label) }
+            .filter { !isNonResultControlLabel(it.label) }
 
         // Icon-shaped controls (overflow dots, share/heart glyphs) are
         // dropped when a wider, row-shaped candidate exists - but if that
