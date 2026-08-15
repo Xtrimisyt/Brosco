@@ -148,10 +148,20 @@ object CommandProcessor {
 
             // Section 3: app-automation flows
             detectedIntent.type == IntentType.ZOMATO_ORDER -> {
-                runZomatoFlow(context, detectedIntent.target, speak)
+                // If we're already mid-order on Zomato (e.g. this is a
+                // follow-up like "now get garlic bread on zomato" a few
+                // seconds after the last item), go back to the menu instead
+                // of relaunching the app from scratch.
+                val recentOrderApp = lastOrderApp?.takeIf {
+                    System.currentTimeMillis() - lastOrderAt < ORDER_CONTEXT_WINDOW_MS
+                }
+                runZomatoFlow(context, detectedIntent.target, speak, alreadyOpen = recentOrderApp == "zomato")
             }
             detectedIntent.type == IntentType.DOMINOS_ORDER -> {
-                runDominosFlow(context, detectedIntent.target, speak)
+                val recentOrderApp = lastOrderApp?.takeIf {
+                    System.currentTimeMillis() - lastOrderAt < ORDER_CONTEXT_WINDOW_MS
+                }
+                runDominosFlow(context, detectedIntent.target, speak, alreadyOpen = recentOrderApp == "dominos")
             }
             detectedIntent.type == IntentType.ADD_ITEM -> {
                 if (detectedIntent.target.isBlank()) {
@@ -544,6 +554,35 @@ object CommandProcessor {
     // ------------------------------------------------------------------
     // Section 5: Planning - chained multi-step voice commands
     // ------------------------------------------------------------------
+    // Words that strip down to a bare food item name: leading verb, the
+    // app's own name(s), and the on/from/via connector that ties them
+    // together. Shared between the food-chain detector and the per-item
+    // cleanup below so both agree on what counts as "just the food name".
+    private val orderLeadWordsRegex = Regex("^\\s*(order|get|add|buy|please)\\s+")
+    private val appConnectorRegex = Regex("\\b(on|from|via)\\s+(domino'?s|zomato)\\b")
+    private val bareAppNameRegex = Regex("\\b(domino'?s|zomato)\\b")
+
+    private fun extractFoodItem(piece: String): String {
+        return piece
+            .replace(orderLeadWordsRegex, "")
+            .replace(appConnectorRegex, "")
+            .replace(bareAppNameRegex, "")
+            .replace(Regex("\\bplease\\b"), "")
+            .trim()
+    }
+
+    // Phrases that mean this chain is really a low-level step-by-step
+    // automation script ("open zomato then search burger then add to
+    // cart") rather than a plain list of food items to order one after
+    // another. The food-item fast path below must NOT fire for these -
+    // it would mangle a literal instruction like "search burger" by
+    // trying to treat "burger" as the whole order.
+    private val explicitStepPhrases = listOf(
+        " open ", " search ", " click ", " tap ", " scroll", " swipe",
+        "view cart", "add to cart", "add more items", " play ", " call ",
+        " message ", " go home", " go back"
+    )
+
     private fun runChain(
         context: Context,
         chained: String,
@@ -558,6 +597,46 @@ object CommandProcessor {
 
         if (pieces.isEmpty()) {
             speak("I didn't catch the steps in that.")
+            return
+        }
+
+        // ---- Food-order fast path ----
+        // "order farmhouse then garlic bread on domino's" only names the
+        // app once, attached to the LAST item - splitting the sentence on
+        // "then" and running each half through the normal per-piece
+        // detector loses that context for every earlier piece, which used
+        // to fall through to a hardcoded Zomato fallback regardless of what
+        // was actually asked for. Detecting the app from the whole sentence
+        // up front and driving every item through the SAME app's flow -
+        // with alreadyOpen=true for everything after the first, so it goes
+        // back to the menu via the app's own cart screen rather than
+        // relaunching from scratch - keeps every item on the right app and
+        // reuses the "back to menu" navigation the same way a person would.
+        val globalOrderApp = when {
+            Regex("\\bdomino").containsMatchIn(chained) -> "dominos"
+            Regex("\\bzomato").containsMatchIn(chained) -> "zomato"
+            else -> null
+        }
+        val paddedChain = " $chained "
+        val looksLikeExplicitSteps = explicitStepPhrases.any { paddedChain.contains(it) }
+
+        if (globalOrderApp != null && !looksLikeExplicitSteps) {
+            val appLabel = if (globalOrderApp == "dominos") "Domino's" else "Zomato"
+            speak("On it - ${pieces.size} item${if (pieces.size == 1) "" else "s"} on $appLabel.")
+            scope.safeLaunch {
+                for ((index, piece) in pieces.withIndex()) {
+                    val item = extractFoodItem(piece).ifBlank { piece }
+                    if (globalOrderApp == "dominos") {
+                        runDominosFlow(context, item, speak, alreadyOpen = index > 0)
+                    } else {
+                        runZomatoFlow(context, item, speak, alreadyOpen = index > 0)
+                    }
+                    if (index < pieces.lastIndex) {
+                        awaitAutomationIdle()
+                        delay(700)
+                    }
+                }
+            }
             return
         }
 
@@ -626,13 +705,18 @@ object CommandProcessor {
             AutomationStep.Wait(1600),
             AutomationStep.ClickText("Add"),
             AutomationStep.Wait(700),
-            AutomationStep.ClickText("View Cart")
+            // Opening the cart view is a nice-to-have, not the point of the
+            // flow - the item is already added by the time this runs, so a
+            // missing/renamed "View Cart" button shouldn't make the whole
+            // command get reported as failed.
+            AutomationStep.ClickText("View Cart", optional = true)
         )
 
         WhatsAppAccessibilityService.runTask(
             steps = steps,
             onUpdate = { speak(it) },
-            onDone = { speak("$query is in your cart - take a look and confirm the order.") }
+            onDone = { speak("$query is in your cart - take a look and confirm the order.") },
+            onFail = { speak("I couldn't finish adding $query on Zomato - the app may have changed screens or nothing matched that name. Take a look and try again.") }
         )
         speak("Searching for $query on Zomato.")
     }
@@ -666,17 +750,21 @@ object CommandProcessor {
             AutomationStep.Wait(1600),
             AutomationStep.ClickFirstResult(excludeText = query, matchQuery = query),
             AutomationStep.Wait(1400),
-            AutomationStep.ClickText("Medium"),
+            // Not every item has a size picker (sides, garlic bread,
+            // beverages don't) - marking this optional stops a 5s timeout +
+            // false "failed" report on every non-pizza item.
+            AutomationStep.ClickText("Medium", optional = true),
             AutomationStep.Wait(700),
             AutomationStep.ClickText("Add"),
             AutomationStep.Wait(700),
-            AutomationStep.ClickText("Cart")
+            AutomationStep.ClickText("Cart", optional = true)
         )
 
         WhatsAppAccessibilityService.runTask(
             steps = steps,
             onUpdate = { speak(it) },
-            onDone = { speak("$query is in the cart - medium size, change it there if you want something else.") }
+            onDone = { speak("$query is in the cart - medium size, change it there if you want something else.") },
+            onFail = { speak("I couldn't finish adding $query on Domino's - the app may have changed screens or nothing matched that name. Take a look and try again.") }
         )
         speak("Looking for $query on Domino's.")
     }
@@ -719,7 +807,8 @@ object CommandProcessor {
             onDone = {
                 speak("Playing $term.")
                 onPlaybackStarted()
-            }
+            },
+            onFail = { speak("Couldn't find \"$term\" on YouTube - the app may still be loading, or nothing matched that name.") }
         )
         speak("Searching YouTube for $term.")
     }
@@ -753,7 +842,8 @@ object CommandProcessor {
             onDone = {
                 speak("Playing $term.")
                 onPlaybackStarted()
-            }
+            },
+            onFail = { speak("Couldn't find \"$term\" on Spotify - the app may still be loading, or nothing matched that name.") }
         )
         speak("Searching Spotify for $term.")
     }
@@ -806,7 +896,8 @@ object CommandProcessor {
                 // started. Stopping the listener once playback begins is
                 // what lets it actually keep playing.
                 onPlaybackStarted()
-            }
+            },
+            onFail = { speak("Couldn't find \"$term\" on JioSaavn - the app may still be loading, or nothing matched that name.") }
         )
         speak("Searching JioSaavn for $term.")
     }
@@ -855,7 +946,8 @@ object CommandProcessor {
             onDone = {
                 speak("Playing your playlist.")
                 onPlaybackStarted()
-            }
+            },
+            onFail = { speak("Couldn't open your playlist on JioSaavn - the Library screen may have looked different than expected.") }
         )
         speak("Opening your playlist on JioSaavn.")
     }
