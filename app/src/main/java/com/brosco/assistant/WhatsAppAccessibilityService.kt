@@ -188,10 +188,30 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     // is simply: run the ticker there instead. Worst case a node query now
     // stalls a throwaway background thread instead of the one thread the
     // whole system depends on to consider the app "responding".
-    private val tickerThread = HandlerThread("BrocoTicker").apply { start() }
-    private val tickerHandler = Handler(tickerThread.looper)
+    // var, not val: a watchdog below can tear this down and rebuild it if
+    // the thread itself ever dies (see ticker/watchdog comments further
+    // down) - a val HandlerThread that dies has no way back without
+    // recreating the whole service.
+    private var tickerThread = HandlerThread("BrocoTicker").apply { start() }
+    private var tickerHandler = Handler(tickerThread.looper)
     private var alive = false
     private var wakeLock: PowerManager.WakeLock? = null
+
+    // Bumped by the ticker on every tick, checked by the watchdog below.
+    // This is how the watchdog tells "ticker thread quietly died" apart
+    // from "nothing to do right now" - the ticker reschedules itself
+    // unconditionally every TICK_MS regardless of whether there's a task
+    // in the queue, so a stalled timestamp always means the thread itself
+    // stopped, not just an idle queue.
+    @Volatile
+    private var lastTickAt = 0L
+
+    private val watchdogHandler = Handler(Looper.getMainLooper())
+    // Checked every 8s, and a ticker is only considered stalled after 8s of
+    // silence - comfortably above TICK_MS (90ms) so a healthy ticker never
+    // trips this, but still well clear of even a slow multi-second Binder
+    // call into another app's process, so a restart never fires mid-tick.
+    private val watchdogIntervalMs = 8000L
 
     // Automations that open a fresh app (order flows, music search) take
     // several seconds of typing/waiting/tapping - long enough that if the
@@ -255,25 +275,75 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         override fun run() {
             try {
                 tick()
-            } catch (e: Exception) {
-                Log.e("Brosco", "Tick failed: ${e.message}")
+            } catch (e: Throwable) {
+                // Throwable, not Exception: an Error here (e.g. from a
+                // pathological node tree) must not be allowed to unwind
+                // past this catch. If it did, it would hit tickerThread's
+                // own uncaught-exception handler and quietly end that
+                // thread's Looper - after which tickerHandler.postDelayed
+                // below would simply never run again. That's the exact
+                // "stops responding, have to toggle it off and on" report:
+                // no crash, no "malfunctioning" banner, just a ticker that
+                // silently stopped ticking forever. The watchdog below is
+                // the second line of defense in case this one is somehow
+                // bypassed (e.g. a native crash inside a Binder call).
+                Log.e("Brosco", "Tick failed: ${e.message}", e)
             }
+            lastTickAt = System.currentTimeMillis()
             if (alive) tickerHandler.postDelayed(this, TICK_MS)
         }
+    }
+
+    // Watches the ticker from the MAIN thread (deliberately a different
+    // thread than the one being watched) and rebuilds tickerThread from
+    // scratch if it ever goes quiet. Covers every way the ticker could stop
+    // ticking that isn't a clean onDestroy: the HandlerThread dying from an
+    // uncaught Throwable, the OS aggressively freezing/killing a background
+    // thread under memory pressure or Doze, or anything else nobody thought
+    // to guard against explicitly. This is what turns "stuck until you
+    // manually flip Accessibility off and on" into "recovers on its own
+    // within ~5 seconds" - the whole point of the fix.
+    private val watchdog = object : Runnable {
+        override fun run() {
+            if (!alive) return
+            val staleFor = System.currentTimeMillis() - lastTickAt
+            if (lastTickAt != 0L && staleFor > watchdogIntervalMs) {
+                Log.w("Brosco", "Ticker stalled for ${staleFor}ms - restarting ticker thread")
+                restartTicker()
+            }
+            watchdogHandler.postDelayed(this, watchdogIntervalMs)
+        }
+    }
+
+    private fun restartTicker() {
+        try {
+            tickerHandler.removeCallbacks(ticker)
+            if (tickerThread.isAlive) tickerThread.quitSafely()
+        } catch (e: Exception) {
+            Log.e("Brosco", "restartTicker cleanup failed: ${e.message}", e)
+        }
+        tickerThread = HandlerThread("BrocoTicker").apply { start() }
+        tickerHandler = Handler(tickerThread.looper)
+        lastTickAt = System.currentTimeMillis()
+        tickerHandler.post(ticker)
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         alive = true
+        lastTickAt = System.currentTimeMillis()
         tickerHandler.removeCallbacks(ticker)
         tickerHandler.post(ticker)
+        watchdogHandler.removeCallbacks(watchdog)
+        watchdogHandler.postDelayed(watchdog, watchdogIntervalMs)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         alive = false
         if (instance === this) instance = null
+        watchdogHandler.removeCallbacks(watchdog)
         tickerHandler.removeCallbacks(ticker)
         tickerThread.quitSafely()
         releaseTaskWakeLock()
