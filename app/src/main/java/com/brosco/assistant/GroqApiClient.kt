@@ -1,6 +1,7 @@
 package com.brosco.assistant
 
 import android.content.Context
+import android.util.Log
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -22,9 +23,23 @@ object GroqApiClient {
     private const val CHAT_MODEL = "openai/gpt-oss-120b"
     private const val SEARCH_MODEL = "groq/compound"
 
+    // Plain chat calls (gpt-oss-120b, no browsing) - fast, 30s read is
+    // plenty.
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(35, TimeUnit.SECONDS)
+        .build()
+
+    // groq/compound (needsSearch = true, "current news"/"look this up"/etc.)
+    // actually goes out and browses the web before it can answer, which
+    // routinely takes longer than 30s - that was silently tripping the same
+    // readTimeout used for plain chat and turning into "I didn't get a
+    // response back." on exactly the queries where search was needed most.
+    private val searchClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .callTimeout(65, TimeUnit.SECONDS)
         .build()
 
     private val newsKeywords = listOf(
@@ -282,7 +297,9 @@ object GroqApiClient {
                 "say you can't browse the internet or don't have real-time access - for this reply, you do."
         } else ""
 
-        val body = JSONObject().apply {
+        // Factored so the request can be rebuilt with history dropped on
+        // retry (see below) without duplicating the whole system prompt.
+        fun buildBody(includeHistory: Boolean): JSONObject = JSONObject().apply {
             put("model", model)
             put("max_tokens", estimateMaxTokens(query, needsSearch))
             if (!needsSearch) {
@@ -326,11 +343,13 @@ object GroqApiClient {
                         "clarifying question when it's genuinely ambiguous between very different things." +
                         factsBlock + toneBlock + screenBlock + searchBlock)
                 })
-                history.forEach { turn ->
-                    put(JSONObject().apply {
-                        put("role", if (turn.role == "assistant") "assistant" else "user")
-                        put("content", turn.text)
-                    })
+                if (includeHistory) {
+                    history.forEach { turn ->
+                        put(JSONObject().apply {
+                            put("role", if (turn.role == "assistant") "assistant" else "user")
+                            put("content", turn.text)
+                        })
+                    }
                 }
                 put(JSONObject().apply {
                     put("role", "user")
@@ -339,29 +358,77 @@ object GroqApiClient {
             })
         }
 
-        val request = Request.Builder()
+        fun buildRequest(includeHistory: Boolean): Request = Request.Builder()
             .url(URL)
             .addHeader("Authorization", "Bearer $API_KEY")
             .addHeader("content-type", "application/json")
-            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .post(buildBody(includeHistory).toString().toRequestBody("application/json".toMediaType()))
             .build()
 
+        val httpClient = if (needsSearch) searchClient else client
+
+        // Attempt 1: the real request, full history + context.
+        executeChat(httpClient, buildRequest(includeHistory = true))?.let { return it }
+
+        // Attempt 2: same model, history dropped. Covers the "big message"
+        // failure mode - a long conversation history plus a long query can
+        // push the combined prompt past the model's context limit, and
+        // Groq answers with an error body (no "choices") rather than a
+        // completion. Previously that error body was the end of the line:
+        // it fell straight through to "I didn't get a response back." with
+        // no retry at all.
+        if (history.isNotEmpty()) {
+            executeChat(httpClient, buildRequest(includeHistory = false))?.let { return it }
+        }
+
+        // Attempt 3: search queries only - groq/compound (the model that
+        // actually browses the web) is slower and more failure-prone than
+        // plain chat, so give up on live search and answer from what the
+        // model already knows rather than surfacing a dead end.
+        if (needsSearch) {
+            try {
+                return askFallbackNoSearch(context, query)
+            } catch (e: Exception) {
+                Log.w("Brosco", "askFallbackNoSearch also failed: ${e.message}")
+            }
+        }
+
+        return "I couldn't reach the server just now - mind trying that again?"
+    }
+
+    /**
+     * Runs one chat-completion call and returns the reply text, or null if
+     * the call failed outright (network/timeout exception) or Groq
+     * responded without a usable "choices" array - a rate limit, an
+     * over-length request, or any other API-side error all look like this.
+     * Callers retry/fall back on null instead of surfacing a dead-end
+     * message straight away.
+     */
+    private fun executeChat(httpClient: OkHttpClient, request: Request): String? {
         return try {
-            client.newCall(request).execute().use { response ->
-                val json = JSONObject(response.body?.string() ?: "{}")
-                val choices = json.optJSONArray("choices") ?: return "I didn't get a response back."
+            httpClient.newCall(request).execute().use { response ->
+                val bodyStr = response.body?.string() ?: "{}"
+                val json = JSONObject(bodyStr)
+
+                if (!response.isSuccessful) {
+                    Log.w("Brosco", "Groq API HTTP ${response.code}: ${bodyStr.take(500)}")
+                    return null
+                }
+
+                val choices = json.optJSONArray("choices")
+                if (choices == null) {
+                    Log.w("Brosco", "Groq API 200 with no choices: ${bodyStr.take(500)}")
+                    return null
+                }
                 if (choices.length() == 0) return "I couldn't find an answer to that."
+
                 val message = choices.getJSONObject(0).optJSONObject("message")
-                message?.optString("content") ?: "I couldn't find an answer to that."
+                val content = message?.optString("content")
+                if (content.isNullOrBlank()) null else content
             }
         } catch (e: Exception) {
-            if (needsSearch) {
-                try {
-                    return askFallbackNoSearch(context, query)
-                } catch (_: Exception) {
-                }
-            }
-            "I couldn't reach the server. Check your connection."
+            Log.w("Brosco", "Groq API call failed: ${e.message}")
+            null
         }
     }
 
@@ -390,12 +457,6 @@ object GroqApiClient {
             .addHeader("content-type", "application/json")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        return client.newCall(request).execute().use { response ->
-            val json = JSONObject(response.body?.string() ?: "{}")
-            val choices = json.optJSONArray("choices") ?: return "I couldn't find an answer to that."
-            if (choices.length() == 0) return "I couldn't find an answer to that."
-            val message = choices.getJSONObject(0).optJSONObject("message")
-            message?.optString("content") ?: "I couldn't find an answer to that."
-        }
+        return executeChat(client, request) ?: "I couldn't find an answer to that."
     }
 }
