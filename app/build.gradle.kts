@@ -41,4 +41,9 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    // Overnight briefing mode ("work brosco goodnight") - WorkManager is
+    // what actually survives the app process being killed overnight, unlike
+    // a plain Handler/coroutine timer which dies the moment Android kills
+    // the process to reclaim memory while the phone is idle.
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
 }
