@@ -67,6 +67,32 @@ object CommandProcessor {
     private var lastOrderAt: Long = 0L
     private val ORDER_CONTEXT_WINDOW_MS = 3 * 60 * 1000L
 
+    /**
+     * Entry point for "Share via -> Brosco" on a video file (see
+     * MainActivity's ACTION_SEND handling). Takes a Uri rather than text
+     * since that's how a shared video actually arrives, so it doesn't fit
+     * the normal text-command pipeline above.
+     */
+    fun analyzeVideo(
+        context: Context,
+        uri: android.net.Uri,
+        question: String,
+        scope: CoroutineScope,
+        rawSpeak: (String) -> Unit
+    ) {
+        val speak: (String) -> Unit = { response ->
+            MemoryStore.record(context, "[shared a video] $question".trim(), response)
+            rawSpeak(response)
+        }
+        speak("Looking at the video now - this can take a moment.")
+        scope.safeLaunch {
+            val answer = withContext(Dispatchers.IO) {
+                VideoFrameAnalyzer.analyze(context, uri, question)
+            }
+            speak(answer)
+        }
+    }
+
     fun process(
         context: Context,
         rawText: String,
@@ -127,6 +153,24 @@ object CommandProcessor {
                 LearnedFacts.clear(context)
                 UsageStats.clear(context)
                 speak("Done - I've forgotten everything up to now.")
+            }
+
+            // Overnight work mode
+            detectedIntent.type == IntentType.START_OVERNIGHT_WORK -> {
+                OvernightScheduler.start(context)
+                speak(
+                    "Got it - I'll check markets and news every ${OvernightScheduler.INTERVAL_MINUTES.toInt()} " +
+                        "minutes through the night and have a briefing ready. Ask me for it whenever you're up, " +
+                        "or say \"stop working overnight\" to call it off."
+                )
+            }
+            detectedIntent.type == IntentType.STOP_OVERNIGHT_WORK -> {
+                val wasActive = OvernightScheduler.isActive(context)
+                OvernightScheduler.stop(context)
+                speak(if (wasActive) "Stopped - no more overnight runs." else "Overnight mode wasn't running.")
+            }
+            detectedIntent.type == IntentType.OVERNIGHT_BRIEFING -> {
+                speak(NightDigestStore.formatBriefing(context))
             }
 
             // Section 6: WhatsApp smart replies
