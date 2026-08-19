@@ -81,6 +81,17 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
 
     private fun isSleepCommand(text: String): Boolean = sleepPhrases.contains(text.trim().lowercase())
 
+    // "work brosco goodnight" needs to be checked against the FULL heard
+    // phrase, not the text left over after stripping the wake word - if you
+    // strip "brosco" out of "work brosco goodnight" via substringAfter (as
+    // the wake-word handling below does to isolate the command), you're
+    // left with just "goodnight", which is indistinguishable from plain
+    // "goodnight" and the word "work" silently vanishes. Delegating to
+    // IntentDetector keeps this in sync with the same phrase list used for
+    // typed commands in MainActivity instead of duplicating it here.
+    private fun isOvernightWorkCommand(text: String): Boolean =
+        IntentDetector.detect(text).type == IntentType.START_OVERNIGHT_WORK
+
     override fun onCreate() {
         super.onCreate()
 
@@ -300,6 +311,10 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
         if (expectingCommand) {
 
             expectingCommand = false
+            if (isOvernightWorkCommand(heard)) {
+                startOvernightWorkAndSleep()
+                return
+            }
             if (isSleepCommand(heard)) {
                 goToSleep()
                 return
@@ -309,6 +324,13 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
         }
 
         if (matchedWake != null) {
+
+            // Checked against the FULL heard phrase (not afterWake) - see
+            // isOvernightWorkCommand's comment for why.
+            if (isOvernightWorkCommand(heard)) {
+                startOvernightWorkAndSleep()
+                return
+            }
 
             val afterWake = lower.substringAfter(matchedWake).trim()
 
@@ -333,11 +355,30 @@ class BrocoBackgroundService : Service(), TextToSpeech.OnInitListener {
 
                 }, 8000)
             }
+        } else if (isOvernightWorkCommand(heard)) {
+            // Bare "work goodnight" with no wake word, same low-risk logic as bare "sleep" below.
+            startOvernightWorkAndSleep()
         } else if (isSleepCommand(lower)) {
             // Bare "sleep" with no wake word - deliberate and low-risk (worst
             // case you just have to reopen the app), so no wake word required.
             goToSleep()
         }
+    }
+
+    /**
+     * "work brosco goodnight" - starts the overnight WorkManager gather
+     * cycle (survives this service/process being killed) and then shuts
+     * the live foreground listener down same as a normal goodnight, since
+     * there's no one there to talk to it until morning anyway.
+     */
+    private fun startOvernightWorkAndSleep() {
+        isRunning = false // stops restart() from re-arming the mic once speak() finishes
+        OvernightScheduler.start(applicationContext)
+        speak(
+            "Working on it - I'll check markets and news through the night and have a briefing " +
+                "ready for you. Goodnight, Shrey."
+        )
+        mainHandler.postDelayed({ stopSelf() }, 4500)
     }
 
     /** Shuts the background listener down entirely - only a wake word or reopening the app brings it back. */
