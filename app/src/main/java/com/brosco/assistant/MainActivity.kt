@@ -84,6 +84,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         ensurePermissions()
         updateBackgroundButtonLabel()
+        handleIncomingIntent(intent)
 
         micButton.setOnClickListener {
             safely {
@@ -193,6 +194,58 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             tts.language = Locale.US
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    /**
+     * Handles a video shared into Brosco via Android's share sheet
+     * ("Share via -> Brosco" from Gallery, WhatsApp, etc). See
+     * VideoFrameAnalyzer for exactly what this can and can't tell you about
+     * the video - short version: it looks at a handful of sampled frames,
+     * not the audio.
+     */
+    private fun handleIncomingIntent(intent: Intent?) {
+        if (intent == null || intent.action != Intent.ACTION_SEND) return
+        val mimeType = intent.type ?: return
+        if (!mimeType.startsWith("video/")) return
+
+        val uri = if (android.os.Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        } ?: return
+
+        // Consume it so rotating the screen or returning to the app later
+        // doesn't re-trigger the same analysis.
+        intent.action = null
+
+        val question = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
+        addUserMessage(
+            if (question.isNotBlank()) "[shared a video] $question" else "[shared a video] What's in this?"
+        )
+        galaxyBackground.setActive(true)
+        safely {
+            CommandProcessor.analyzeVideo(
+                context = this,
+                uri = uri,
+                question = question,
+                scope = CoroutineScope(Dispatchers.Main)
+            ) { response ->
+                runOnUiThread {
+                    safely {
+                        stopPulse()
+                        galaxyBackground.setActive(alwaysListening)
+                        speak(response)
+                    }
+                }
+            }
         }
     }
 
