@@ -23,6 +23,13 @@ object GroqApiClient {
     private const val CHAT_MODEL = "openai/gpt-oss-120b"
     private const val SEARCH_MODEL = "groq/compound"
 
+    // Vision-capable model for image/video-frame analysis. Groq doesn't
+    // accept raw video, so VideoFrameAnalyzer pulls a handful of frames out
+    // of a video file and sends them here as images instead - see that
+    // file for the full explanation of why that's the honest ceiling of
+    // "video analysis" on this stack right now.
+    const val VISION_MODEL = "qwen/qwen3.6-27b"
+
     // Plain chat calls (gpt-oss-120b, no browsing) - fast, 30s read is
     // plenty.
     private val client = OkHttpClient.Builder()
@@ -38,13 +45,15 @@ object GroqApiClient {
     // response back." on exactly the queries where search was needed most.
     private val searchClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .callTimeout(65, TimeUnit.SECONDS)
+        .readTimeout(90, TimeUnit.SECONDS)
+        .callTimeout(95, TimeUnit.SECONDS)
         .build()
 
     private val newsKeywords = listOf(
         "news", "latest", "today", "current", "happening", "geopolit",
-        "election", "war", "market", "stock price", "weather", "score"
+        "election", "war", "market", "markets", "stock", "stocks", "stock price",
+        "nasdaq", "dow jones", "s&p", "s&p 500", "nifty", "sensex", "crypto",
+        "bitcoin", "ethereum", "weather", "score", "release date", "just announced"
     )
 
     private val searchTriggers = newsKeywords + listOf(
@@ -458,5 +467,63 @@ object GroqApiClient {
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
         return executeChat(client, request) ?: "I couldn't find an answer to that."
+    }
+
+    /**
+     * Sends up to 5 still images (base64-encoded JPEG, no data: prefix) to
+     * Groq's vision model along with a text prompt, and returns the reply.
+     * Used by VideoFrameAnalyzer for "video analysis" (really: analysis of
+     * a handful of frames pulled out of the video - see that file) and can
+     * also be reused for plain photo questions later.
+     */
+    fun analyzeImages(images: List<String>, prompt: String): String {
+        if (images.isEmpty()) return "I didn't get any usable frames to look at."
+
+        val capped = images.take(5) // Groq's hard limit per request
+
+        val contentArray = JSONArray().apply {
+            put(JSONObject().apply {
+                put("type", "text")
+                put("text", prompt)
+            })
+            capped.forEach { base64Jpeg ->
+                put(JSONObject().apply {
+                    put("type", "image_url")
+                    put("image_url", JSONObject().apply {
+                        put("url", "data:image/jpeg;base64,$base64Jpeg")
+                    })
+                })
+            }
+        }
+
+        val body = JSONObject().apply {
+            put("model", VISION_MODEL)
+            put("max_tokens", 700)
+            put("messages", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "system")
+                    put("content", "You are Brosco, Shrey's assistant. You've been given a small " +
+                        "number of still frames sampled from a video, in chronological order - not the " +
+                        "full video, not the audio. Describe what's actually visible: setting, people, " +
+                        "objects, on-screen text, and how the frames change from one to the next. If the " +
+                        "frames don't give you enough to answer confidently, say what you can tell and " +
+                        "what you can't - don't guess at things like spoken dialogue or audio.")
+                })
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", contentArray)
+                })
+            })
+        }
+
+        val request = Request.Builder()
+            .url(URL)
+            .addHeader("Authorization", "Bearer $API_KEY")
+            .addHeader("content-type", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        return executeChat(searchClient, request)
+            ?: "I couldn't analyze that video just now - mind trying again?"
     }
 }
