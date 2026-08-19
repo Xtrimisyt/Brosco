@@ -58,6 +58,17 @@ enum class IntentType {
     // Memory
     CLEAR_MEMORY,
 
+    // "work brosco goodnight" mode - gather markets/news overnight via
+    // WorkManager and read it back as a briefing later.
+    START_OVERNIGHT_WORK,
+    STOP_OVERNIGHT_WORK,
+    OVERNIGHT_BRIEFING,
+
+    // Frame-sampled video analysis (see VideoFrameAnalyzer) - reached via
+    // Android's share sheet, not spoken text, so no phrase detection here;
+    // kept in the enum for consistency with how CommandProcessor dispatches.
+    ANALYZE_VIDEO,
+
     UNKNOWN
 }
 
@@ -125,6 +136,41 @@ object IntentDetector {
             input.contains("wipe your memory")
         ) {
             return DetectedIntent(IntentType.CLEAR_MEMORY)
+        }
+
+        // ---- Overnight work mode ("work brosco goodnight") ----
+        // Checked with the full input (not word-boundary-sensitive) since
+        // this is meant to catch loose phrasing - "work brosco goodnight",
+        // "goodnight, keep working", "gather news while I sleep", etc.
+        val overnightStopPhrases = listOf(
+            "stop working overnight", "cancel overnight", "stop the overnight",
+            "cancel the overnight", "stop overnight mode"
+        )
+        if (overnightStopPhrases.any { input.contains(it) }) {
+            return DetectedIntent(IntentType.STOP_OVERNIGHT_WORK)
+        }
+
+        val overnightBriefingPhrases = listOf(
+            "my briefing", "overnight briefing", "morning briefing",
+            "what did you find while i was asleep", "what did you find overnight",
+            "what happened while i was asleep", "what happened overnight",
+            "read me the digest", "give me the digest", "overnight digest",
+            "what did you gather"
+        )
+        if (overnightBriefingPhrases.any { input.contains(it) }) {
+            return DetectedIntent(IntentType.OVERNIGHT_BRIEFING)
+        }
+
+        val mentionsWork = input.contains("work")
+        val mentionsGoodnight = input.contains("goodnight") || input.contains("good night")
+        val overnightStartPhrases = listOf(
+            "work overnight", "work through the night", "work while i sleep",
+            "work while i'm asleep", "work while im asleep", "gather news while i sleep",
+            "analyze stocks at night", "analyse stocks at night", "start overnight mode",
+            "overnight mode"
+        )
+        if ((mentionsWork && mentionsGoodnight) || overnightStartPhrases.any { input.contains(it) }) {
+            return DetectedIntent(IntentType.START_OVERNIGHT_WORK)
         }
 
         // ---- Section 6: WhatsApp smart replies ----
@@ -288,7 +334,7 @@ object IntentDetector {
             return DetectedIntent(IntentType.ZOMATO_ORDER, match.groupValues[2].trim())
         }
         if (input.contains("zomato")) {
-            val food = input.replace("zomato", "").replace(Regex("order|search|get|on|from|via|open"), "").trim()
+            val food = input.replace("zomato", "").replace(Regex("\\b(order|search|get|on|from|via|open)\\b"), "").trim()
             return DetectedIntent(IntentType.ZOMATO_ORDER, food)
         }
 
@@ -296,7 +342,7 @@ object IntentDetector {
         if (input.contains("domino")) {
             val pizza = input
                 .replace(Regex("domino'?s"), "")
-                .replace(Regex("order|search|get|on|from|via|open|pizza"), "")
+                .replace(Regex("\\b(order|search|get|on|from|via|open|pizza)\\b"), "")
                 .trim()
                 .ifBlank { "pizza" }
             return DetectedIntent(IntentType.DOMINOS_ORDER, pizza)
@@ -310,7 +356,7 @@ object IntentDetector {
         if (input.contains("youtube")) {
             if (input.contains("pause")) return DetectedIntent(IntentType.YOUTUBE_PAUSE)
             if (input.contains("next")) return DetectedIntent(IntentType.YOUTUBE_NEXT)
-            val query = input.replace("youtube", "").replace(Regex("play|search|find|video|videos|on|open"), "").trim()
+            val query = input.replace("youtube", "").replace(Regex("\\b(play|search|find|video|videos|on|open)\\b"), "").trim()
             if (query.isNotBlank()) return DetectedIntent(IntentType.YOUTUBE_SEARCH, query)
         }
 
@@ -322,7 +368,7 @@ object IntentDetector {
         if (input.contains("spotify")) {
             if (input.contains("pause")) return DetectedIntent(IntentType.SPOTIFY_PAUSE)
             if (input.contains("next") || input.contains("skip")) return DetectedIntent(IntentType.SPOTIFY_NEXT)
-            val query = input.replace("spotify", "").replace(Regex("play|search|find|song|on|open"), "").trim()
+            val query = input.replace("spotify", "").replace(Regex("\\b(play|search|find|song|on|open)\\b"), "").trim()
             if (query.isNotBlank()) return DetectedIntent(IntentType.SPOTIFY_SEARCH, query)
         }
 
@@ -346,7 +392,7 @@ object IntentDetector {
             if (input.contains("pause")) return DetectedIntent(IntentType.JIOSAAVN_PAUSE)
             if (input.contains("next") || input.contains("skip")) return DetectedIntent(IntentType.JIOSAAVN_NEXT)
             val query = input.replace(Regex("jiosaavn|saavn"), "")
-                .replace(Regex("play|search|find|song|on|open"), "").trim()
+                .replace(Regex("\\b(play|search|find|song|on|open)\\b"), "").trim()
             if (query.isNotBlank()) return DetectedIntent(IntentType.JIOSAAVN_SEARCH, query)
         }
 
