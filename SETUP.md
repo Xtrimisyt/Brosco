@@ -13,7 +13,7 @@ Use "Add file → Upload files" in the repo, and for each one, type the full pat
 |---|---|
 | `AndroidManifest.xml` | `app/src/main/AndroidManifest.xml` |
 | `MainActivity.kt` | `app/src/main/java/com/brosco/assistant/MainActivity.kt` |
-| `ClaudeApiClient.kt` | `app/src/main/java/com/brosco/assistant/ClaudeApiClient.kt` |
+| `GroqApiClient.kt` | `app/src/main/java/com/brosco/assistant/GroqApiClient.kt` |
 | `activity_main.xml` | `app/src/main/res/layout/activity_main.xml` |
 | `build.gradle.kts` (app-level) | `app/build.gradle.kts` |
 | `build.gradle.kts` (root-level) | `build.gradle.kts` |
@@ -23,10 +23,10 @@ Use "Add file → Upload files" in the repo, and for each one, type the full pat
 
 Two files share the name `build.gradle.kts` — make sure one lands at the repo root and the other inside `app/`, don't overwrite one with the other.
 
-## 3. Add your Anthropic API key as a GitHub Secret (not a plain file)
-1. Get a key from console.anthropic.com — this is a separate paid API account, billed on real usage, tracked on your API dashboard (not your claude.ai subscription).
+## 3. Add your Groq API key as a GitHub Secret (not a plain file)
+1. Get a free key from console.groq.com/keys.
 2. In your repo: Settings → Secrets and variables → Actions → New repository secret.
-3. Name: `ANTHROPIC_API_KEY`, Value: your real key. Save.
+3. Name: `GROQ_API_KEY`, Value: your real key. Save. (This must match exactly — `build.yml` reads `secrets.GROQ_API_KEY`.)
 
 ## 4. Trigger the build
 1. Go to the **Actions** tab in your repo → you should see "Build Brosco APK".
@@ -44,8 +44,10 @@ Two files share the name `build.gradle.kts` — make sure one lands at the repo 
   - **"Call Mom"** → dials Mom directly from your contacts, no API call, no cost.
   - **"Text John saying running late"** → sends an SMS, no API call.
   - **"Open Spotify"** → launches the app, no API call.
-  - **"What's the latest on the Ukraine ceasefire talks"** → this one falls through to Claude, uses web search, costs a bit of API credit.
-  - **"What's 15% of 340"** → falls through to Claude Haiku (cheap), no search needed.
+  - **"What's the latest on the Ukraine ceasefire talks"** → this one falls through to the search-capable model (groq/compound), which actually browses the web.
+  - **"What's 15% of 340"** → falls through to the plain chat model, no search needed.
+  - **"Work Brosco, goodnight"** → starts overnight mode: checks markets and news every 90 minutes while you sleep via a WorkManager job (survives the app being killed), then goes quiet. Ask **"give me my briefing"** in the morning to hear what it found.
+  - **Share a video to Brosco** (from Gallery, WhatsApp, etc via the share sheet) → samples a few frames from it and describes what's visually happening. It can't hear the audio - see VideoFrameAnalyzer.kt for why.
 
 ## 5. Extending it
 - Add more apps to the `appPackages` map in `MainActivity.kt` (find any package name via `adb shell pm list packages`).
