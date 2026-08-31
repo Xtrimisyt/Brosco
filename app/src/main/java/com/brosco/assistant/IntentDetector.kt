@@ -64,6 +64,11 @@ enum class IntentType {
     STOP_OVERNIGHT_WORK,
     OVERNIGHT_BRIEFING,
 
+    // "share a file to Brosco, get it back fixed" - the queueing itself
+    // happens off a share-sheet Uri (see MainActivity), same as
+    // ANALYZE_VIDEO below, but asking for the result back IS spoken text.
+    GET_FIXED_FILE,
+
     // Frame-sampled video analysis (see VideoFrameAnalyzer) - reached via
     // Android's share sheet, not spoken text, so no phrase detection here;
     // kept in the enum for consistency with how CommandProcessor dispatches.
@@ -159,6 +164,16 @@ object IntentDetector {
         )
         if (overnightBriefingPhrases.any { input.contains(it) }) {
             return DetectedIntent(IntentType.OVERNIGHT_BRIEFING)
+        }
+
+        // ---- Overnight file fix ("fix this overnight" -> "give me my fixed file") ----
+        val fixedFilePhrases = listOf(
+            "fixed file", "fix my file", "is my file fixed", "did you fix my file",
+            "give me my file", "give me the fixed file", "file overnight",
+            "did you fix it", "is it fixed", "give me the file back"
+        )
+        if (fixedFilePhrases.any { input.contains(it) }) {
+            return DetectedIntent(IntentType.GET_FIXED_FILE)
         }
 
         val mentionsWork = input.contains("work")
