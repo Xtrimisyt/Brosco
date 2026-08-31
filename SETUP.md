@@ -48,6 +48,9 @@ Two files share the name `build.gradle.kts` — make sure one lands at the repo 
   - **"What's 15% of 340"** → falls through to the plain chat model, no search needed.
   - **"Work Brosco, goodnight"** → starts overnight mode: checks markets and news every 90 minutes while you sleep via a WorkManager job (survives the app being killed), then goes quiet. Ask **"give me my briefing"** in the morning to hear what it found.
   - **Share a video to Brosco** (from Gallery, WhatsApp, etc via the share sheet) → samples a few frames from it and describes what's visually happening. It can't hear the audio - see VideoFrameAnalyzer.kt for why.
+  - **Share a photo to Brosco**, or tap the **📎 attach** button in the app → describes what's in the photo, same vision model as video.
+  - **Tap 📎 attach and pick a text/code file** (or share one from a file manager) → Brosco reads it, fixes real bugs in the background (survives the app being closed), saves the corrected version to your Downloads folder, and notifies you when it's done. Ask **"give me my fixed file"** any time to hear a summary of what changed.
+  - Answers to "current"/"latest"/time-sensitive questions are now stamped with the real date before every model call, so it stops defaulting to stale training-data answers (e.g. treating 2023 as the present).
 
 ## 5. Extending it
 - Add more apps to the `appPackages` map in `MainActivity.kt` (find any package name via `adb shell pm list packages`).
