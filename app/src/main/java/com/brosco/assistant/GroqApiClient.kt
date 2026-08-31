@@ -8,9 +8,32 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 
 object GroqApiClient {
+
+    /**
+     * The model's own training data is stale (currently landing it around
+     * 2023 whenever a question touches anything time-sensitive), and it has
+     * no other way to know what day it actually is. Every system prompt
+     * below stamps the real current date/time in so the model can't quietly
+     * fall back on outdated defaults - this is what was making "what's
+     * going on with X right now" answers come back a year or two behind.
+     */
+    private fun currentDateContext(): String {
+        val fmt = SimpleDateFormat("EEEE, MMMM d, yyyy 'at' h:mm a", Locale.US)
+        fmt.timeZone = TimeZone.getDefault()
+        return "The real current date and time, right now, is ${fmt.format(Date())}. Trust this over " +
+            "any date you might otherwise assume from your training - your training data has a cutoff " +
+            "well before this, so treat anything you'd otherwise guess about \"the latest\"/\"current\" " +
+            "state of fast-moving topics (news, prices, releases, who holds what role, etc.) as " +
+            "possibly outdated unless you actually searched for it just now. Never state or assume a " +
+            "year earlier than the one above as if it were the present."
+    }
 
     private const val API_KEY = BuildConfig.GROQ_API_KEY
     private const val URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -303,7 +326,10 @@ object GroqApiClient {
             "\n\nYou have live web search available right now through this model - actually use it. " +
                 "When Shrey asks you to search, research, google, or look something up, treat it as " +
                 "done: search, then answer with what you actually found, citing what's relevant. Never " +
-                "say you can't browse the internet or don't have real-time access - for this reply, you do."
+                "say you can't browse the internet or don't have real-time access - for this reply, you do. " +
+                "Prioritize what your search turns up over anything you already \"remember\" - if search " +
+                "results conflict with your training data, the search results win, since your training " +
+                "data is old and theirs isn't."
         } else ""
 
         // Factored so the request can be rebuilt with history dropped on
@@ -320,7 +346,8 @@ object GroqApiClient {
             put("messages", JSONArray().apply {
                 put(JSONObject().apply {
                     put("role", "system")
-                    put("content", "You are Brosco, a personal voice-and-chat assistant built by Shrey - " +
+                    put("content", currentDateContext() + "\n\n" +
+                        "You are Brosco, a personal voice-and-chat assistant built by Shrey - " +
                         "think Jarvis from Iron Man, not a generic chatbot. Shrey is your creator and " +
                         "the person you're almost always talking to; address him like a loyal, witty " +
                         "assistant would, occasionally using 'sir' but not on every line. Be warm, " +
@@ -450,9 +477,12 @@ object GroqApiClient {
             put("messages", JSONArray().apply {
                 put(JSONObject().apply {
                     put("role", "system")
-                    put("content", "You are Brosco, Shrey's personal assistant. Web search just failed, " +
-                        "so answer from what you know, and briefly mention you weren't able to pull live " +
-                        "results this time rather than pretending you searched.")
+                    put("content", currentDateContext() + "\n\nYou are Brosco, Shrey's personal " +
+                        "assistant. Web search just failed, so answer from what you know, and briefly " +
+                        "mention you weren't able to pull live results this time rather than pretending " +
+                        "you searched. Since you're answering from memory, be upfront if the answer is " +
+                        "the kind of thing that changes over time (prices, current events, who holds a " +
+                        "role) rather than stating a stale fact with full confidence.")
                 })
                 put(JSONObject().apply {
                     put("role", "user")
@@ -525,5 +555,66 @@ object GroqApiClient {
 
         return executeChat(searchClient, request)
             ?: "I couldn't analyze that video just now - mind trying again?"
+    }
+
+    /**
+     * Overnight file-fix mode: Shrey shares a text/code file before bed,
+     * FileFixWorker calls this once (see that file), and we ask the model
+     * to actually read and repair it rather than just chat about it.
+     * Returns raw model output in the format:
+     *   <plain-language summary of what was changed>
+     *   ---FIXED FILE---
+     *   <complete corrected file content>
+     * FileFixStore splits on that marker - see FileFixWorker.
+     */
+    fun fixFile(fileName: String, content: String): String {
+        // Rough token budget: give it room to reproduce the whole file back
+        // plus a summary, scaled to how much was sent in, capped so one
+        // huge file can't hang the request indefinitely.
+        val approxInputTokens = content.length / 4
+        val maxTokens = (approxInputTokens * 2 + 500).coerceIn(800, 6000)
+
+        val body = JSONObject().apply {
+            put("model", CHAT_MODEL)
+            put("max_tokens", maxTokens)
+            put("include_reasoning", false)
+            put("reasoning_effort", "medium")
+            put("messages", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "system")
+                    put("content", currentDateContext() + "\n\nYou are Brosco, working overnight on a " +
+                        "file Shrey handed you before going to sleep, so he can pick up the result in " +
+                        "the morning - he's not around to answer follow-up questions right now. The " +
+                        "file is named \"$fileName\". Read it carefully and fix real problems: bugs, " +
+                        "broken logic, typos, syntax errors, obvious security issues, anything that " +
+                        "would actually fail or misbehave. Don't rewrite working code just for style, " +
+                        "don't add features he didn't ask for, and don't change behavior that looks " +
+                        "intentional even if it's not how you'd have written it. If genuinely nothing " +
+                        "is broken, say so rather than inventing changes to justify the pass. " +
+                        "Reply in EXACTLY this format and nothing else: first, a short plain-language " +
+                        "list of what you changed and why (or one line saying nothing needed fixing); " +
+                        "then a line containing exactly ---FIXED FILE--- and nothing else on it; then " +
+                        "the complete corrected file content, in full, with no surrounding commentary, " +
+                        "markdown fences, or explanation after it.")
+                })
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", content)
+                })
+            })
+        }
+
+        val request = Request.Builder()
+            .url(URL)
+            .addHeader("Authorization", "Bearer $API_KEY")
+            .addHeader("content-type", "application/json")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        // Reuse the longer-timeout client - fixing a whole file back-and-
+        // forth with the model is closer in shape to a search call than a
+        // quick chat reply.
+        return executeChat(searchClient, request)
+            ?: throw java.io.IOException("Groq API call failed while fixing $fileName")
     }
 }
