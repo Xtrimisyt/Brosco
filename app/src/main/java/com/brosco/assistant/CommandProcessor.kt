@@ -93,6 +93,59 @@ object CommandProcessor {
         }
     }
 
+    /**
+     * Entry point for "Share via -> Brosco" (or the in-app attach button)
+     * on a photo. Mirrors analyzeVideo above but for a single still image.
+     */
+    fun analyzeImage(
+        context: Context,
+        uri: android.net.Uri,
+        question: String,
+        scope: CoroutineScope,
+        rawSpeak: (String) -> Unit
+    ) {
+        val speak: (String) -> Unit = { response ->
+            MemoryStore.record(context, "[shared a photo] $question".trim(), response)
+            rawSpeak(response)
+        }
+        speak("Looking at the photo now.")
+        scope.safeLaunch {
+            val answer = withContext(Dispatchers.IO) {
+                ImageAnalyzer.analyze(context, uri, question)
+            }
+            speak(answer)
+        }
+    }
+
+    /**
+     * Entry point for "Share via -> Brosco" (or the in-app attach button)
+     * on a text/code file with intent to have it fixed overnight. Just
+     * queues the job and schedules the background worker - the actual fix
+     * happens later via FileFixWorker, possibly after this process is
+     * killed, so there's nothing to await here.
+     */
+    fun queueFileFix(
+        context: Context,
+        fileName: String,
+        content: String,
+        rawSpeak: (String) -> Unit
+    ) {
+        val speak: (String) -> Unit = { response ->
+            MemoryStore.record(context, "[shared a file to fix] $fileName", response)
+            rawSpeak(response)
+        }
+        if (content.isBlank()) {
+            speak("I couldn't read any text out of that file, so there's nothing for me to fix.")
+            return
+        }
+        FileFixStore.queue(context, fileName, content)
+        FileFixScheduler.schedule(context)
+        speak(
+            "Got it - I'll go through $fileName in the background and have a fixed version ready. " +
+                "Ask me for it whenever, or check Downloads."
+        )
+    }
+
     fun process(
         context: Context,
         rawText: String,
@@ -171,6 +224,32 @@ object CommandProcessor {
             }
             detectedIntent.type == IntentType.OVERNIGHT_BRIEFING -> {
                 speak(NightDigestStore.formatBriefing(context))
+            }
+
+            // Overnight file fix
+            detectedIntent.type == IntentType.GET_FIXED_FILE -> {
+                when (FileFixStore.status(context)) {
+                    null -> speak(
+                        "I don't have a file queued - share one with me (say what needs fixing, or " +
+                            "just share it) and I'll work on it in the background."
+                    )
+                    "pending" -> speak("Still working on it - give me a bit longer and ask again.")
+                    "failed" -> speak(
+                        "I ran into a problem fixing that one - mind sharing it again so I can retry?"
+                    )
+                    "done" -> {
+                        val result = FileFixStore.result(context)
+                        if (result == null) {
+                            speak("I finished but lost track of the result - could you share it again?")
+                        } else {
+                            speak(
+                                "Done with ${result.fileName}. ${result.summary} I've also saved a " +
+                                    "fixed copy to your Downloads folder."
+                            )
+                        }
+                    }
+                    else -> speak("I don't have a file queued right now.")
+                }
             }
 
             // Section 6: WhatsApp smart replies
