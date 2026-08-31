@@ -25,11 +25,14 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
@@ -45,7 +48,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var sendTextButton: Button
     private lateinit var alwaysListenButton: Button
     private lateinit var backgroundServiceButton: Button
+    private lateinit var attachButton: Button
     private var pulseAnimator: ObjectAnimator? = null
+
+    // Single picker for "📎 attach" - covers photos, videos, and text/code
+    // files to fix overnight. Registered as a field (not inside onCreate)
+    // since registerForActivityResult must run before the activity reaches
+    // STARTED; routing on the picked Uri's actual mime type below means one
+    // button and one launcher cover all three cases from the same tap.
+    private val attachLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) safely { handleAttachedContent(uri, contentResolver.getType(uri) ?: "") }
+    }
 
     // Claude-style chat transcript: chatScroll holds chatContainer, and
     // every user/assistant turn becomes a bubble row appended to it.
@@ -72,6 +85,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         sendTextButton = findViewById(R.id.sendTextButton)
         alwaysListenButton = findViewById(R.id.alwaysListenButton)
         backgroundServiceButton = findViewById(R.id.backgroundServiceButton)
+        attachButton = findViewById(R.id.attachButton)
         chatScroll = findViewById(R.id.chatScroll)
         chatContainer = findViewById(R.id.chatContainer)
         emptyStateText = findViewById(R.id.emptyStateText)
@@ -108,6 +122,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             safely {
                 if (alwaysListening) stopAlwaysListening() else startAlwaysListening()
             }
+        }
+
+        attachButton.setOnClickListener {
+            safely { attachLauncher.launch("*/*") }
         }
 
         backgroundServiceButton.setOnClickListener {
@@ -204,16 +222,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     /**
-     * Handles a video shared into Brosco via Android's share sheet
-     * ("Share via -> Brosco" from Gallery, WhatsApp, etc). See
-     * VideoFrameAnalyzer for exactly what this can and can't tell you about
-     * the video - short version: it looks at a handful of sampled frames,
-     * not the audio.
+     * Handles anything shared into Brosco via Android's share sheet
+     * ("Share via -> Brosco" from Gallery, WhatsApp, a file manager, etc) -
+     * photos, videos, and text/code files all arrive this same way, routed
+     * by mime type below. See VideoFrameAnalyzer/ImageAnalyzer for what
+     * "video/photo analysis" can and can't actually tell you.
      */
     private fun handleIncomingIntent(intent: Intent?) {
         if (intent == null || intent.action != Intent.ACTION_SEND) return
         val mimeType = intent.type ?: return
-        if (!mimeType.startsWith("video/")) return
 
         val uri = if (android.os.Build.VERSION.SDK_INT >= 33) {
             intent.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
@@ -227,25 +244,92 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         intent.action = null
 
         val question = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
-        addUserMessage(
-            if (question.isNotBlank()) "[shared a video] $question" else "[shared a video] What's in this?"
-        )
-        galaxyBackground.setActive(true)
-        safely {
-            CommandProcessor.analyzeVideo(
-                context = this,
-                uri = uri,
-                question = question,
-                scope = CoroutineScope(Dispatchers.Main)
-            ) { response ->
-                runOnUiThread {
+        handleAttachedContent(uri, mimeType, question)
+    }
+
+    /**
+     * Single routing point for anything Brosco receives as a Uri - whether
+     * from the share sheet (handleIncomingIntent) or the in-app 📎 attach
+     * button (attachLauncher) - dispatched by mime type: photo -> vision
+     * model on the still image, video -> frame-sampled vision analysis,
+     * anything else assumed to be a text/code file Shrey wants fixed.
+     */
+    private fun handleAttachedContent(uri: android.net.Uri, mimeType: String, question: String = "") {
+        when {
+            mimeType.startsWith("video/") -> {
+                addUserMessage(
+                    if (question.isNotBlank()) "[shared a video] $question" else "[shared a video] What's in this?"
+                )
+                galaxyBackground.setActive(true)
+                safely {
+                    CommandProcessor.analyzeVideo(
+                        context = this,
+                        uri = uri,
+                        question = question,
+                        scope = CoroutineScope(Dispatchers.Main)
+                    ) { response -> runOnUiThread { safely { stopPulse(); galaxyBackground.setActive(alwaysListening); speak(response) } } }
+                }
+            }
+            mimeType.startsWith("image/") -> {
+                addUserMessage(
+                    if (question.isNotBlank()) "[shared a photo] $question" else "[shared a photo] What's this?"
+                )
+                galaxyBackground.setActive(true)
+                safely {
+                    CommandProcessor.analyzeImage(
+                        context = this,
+                        uri = uri,
+                        question = question,
+                        scope = CoroutineScope(Dispatchers.Main)
+                    ) { response -> runOnUiThread { safely { stopPulse(); galaxyBackground.setActive(alwaysListening); speak(response) } } }
+                }
+            }
+            else -> {
+                // Anything that isn't obviously a photo or video - treat as
+                // a text/code file to fix. Reading it and hitting the API
+                // key-off require IO, so this hops onto a background
+                // dispatcher rather than blocking the UI thread here.
+                val fileName = queryDisplayName(uri) ?: "shared_file.txt"
+                addUserMessage("[shared $fileName] fix this overnight")
+                CoroutineScope(Dispatchers.Main).launch {
+                    val content = withContext(Dispatchers.IO) { readTextFromUri(uri) }
                     safely {
-                        stopPulse()
-                        galaxyBackground.setActive(alwaysListening)
-                        speak(response)
+                        CommandProcessor.queueFileFix(this@MainActivity, fileName, content) { response ->
+                            runOnUiThread { safely { speak(response) } }
+                        }
                     }
                 }
             }
+        }
+    }
+
+    /** Best-effort file name for a content Uri, via the standard OpenableColumns query. */
+    private fun queryDisplayName(uri: android.net.Uri): String? {
+        return try {
+            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (nameIndex >= 0 && cursor.moveToFirst()) cursor.getString(nameIndex) else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // Cap how much of a shared file gets read/sent to the model - a file
+    // fix job isn't meant for entire large codebases, and this keeps one
+    // oversized share from blowing the request past the model's limits.
+    private val MAX_FILE_FIX_BYTES = 150_000
+
+    /** Reads a shared/attached Uri as UTF-8 text, truncated to a sane size. Call off the main thread. */
+    private fun readTextFromUri(uri: android.net.Uri): String {
+        return try {
+            contentResolver.openInputStream(uri)?.use { stream ->
+                val bytes = stream.readBytes()
+                String(bytes.take(MAX_FILE_FIX_BYTES).toByteArray(), Charsets.UTF_8)
+            } ?: ""
+        } catch (e: Exception) {
+            Log.w("Brosco", "Couldn't read shared file: ${e.message}")
+            ""
         }
     }
 
