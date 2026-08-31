@@ -56,6 +56,27 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="video/*" />
             </intent-filter>
+            <!-- "Share via -> Brosco" on a photo from Gallery/WhatsApp/etc,
+                 handled by ImageAnalyzer via the vision model. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <!-- "Share via -> Brosco" on a text/code file (from a file
+                 manager, email attachment, etc) - queued for the overnight
+                 file-fix flow (see FileFixWorker). Covers the two mime
+                 types most file managers actually send code/text files as. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
         </activity>
 
         <service
