@@ -35,6 +35,28 @@ object GroqApiClient {
             "year earlier than the one above as if it were the present."
     }
 
+    /**
+     * Belt-and-suspenders check on top of currentDateContext(): even with
+     * live search and an explicit "the date is X" system message, a model
+     * can occasionally still lean on its stale training data for a news/
+     * markets answer (the exact "why is it telling me about 2023" failure
+     * mode this was built to stop). If a search-grounded answer mentions a
+     * year but never anything from the last 12 months, that's a strong
+     * signal it drifted back to memory instead of using what it searched -
+     * real "current" answers either cite no year at all (most headlines
+     * don't) or cite a recent one. ask() uses this to force exactly one
+     * corrective retry before giving up and returning what it has.
+     */
+    private fun looksStale(text: String): Boolean {
+        val currentYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
+        val years = Regex("\\b(19|20)\\d{2}\\b").findAll(text)
+            .mapNotNull { it.value.toIntOrNull() }
+            .toList()
+        if (years.isEmpty()) return false // no year mentioned at all - not a signal either way
+        val newestMentioned = years.max()
+        return newestMentioned < currentYear - 1
+    }
+
     private const val API_KEY = BuildConfig.GROQ_API_KEY
     private const val URL = "https://api.groq.com/openai/v1/chat/completions"
 
@@ -352,6 +374,13 @@ object GroqApiClient {
                         "the person you're almost always talking to; address him like a loyal, witty " +
                         "assistant would, occasionally using 'sir' but not on every line. Be warm, " +
                         "confident, a little dry-humored, and genuinely helpful - never stiff or robotic. " +
+                        "You are also genuinely, seriously sharp - not just quick with a line, but " +
+                        "actually rigorous: when something is technical, ambiguous, or hard, think it " +
+                        "through properly and give the real, well-reasoned answer instead of a shallow " +
+                        "or hedged one. Don't perform intelligence with jargon - just be right, be " +
+                        "precise, and show your reasoning when it's not obvious, the way the smartest " +
+                        "person in the room actually talks: plainly, and only as complicated as the " +
+                        "problem requires. " +
                         "You have real opinions, takes, and preferences, and you share them plainly when " +
                         "asked - never hide behind lines like 'I'm just an AI', 'I don't have personal " +
                         "beliefs', or 'I can't have opinions'. That's not how you talk. Pick a side, give " +
@@ -394,17 +423,46 @@ object GroqApiClient {
             })
         }
 
-        fun buildRequest(includeHistory: Boolean): Request = Request.Builder()
+        // Retry-only variant of buildBody: same everything, but with one
+        // extra, blunt correction appended to the system prompt so the
+        // second attempt doesn't just repeat the same stale answer.
+        fun buildBody(includeHistory: Boolean, correctionNote: String): JSONObject {
+            val body = buildBody(includeHistory)
+            if (correctionNote.isNotEmpty()) {
+                val messages = body.getJSONArray("messages")
+                val systemMsg = messages.getJSONObject(0)
+                systemMsg.put("content", systemMsg.getString("content") + correctionNote)
+            }
+            return body
+        }
+
+        fun buildRequest(includeHistory: Boolean, correctionNote: String = ""): Request = Request.Builder()
             .url(URL)
             .addHeader("Authorization", "Bearer $API_KEY")
             .addHeader("content-type", "application/json")
-            .post(buildBody(includeHistory).toString().toRequestBody("application/json".toMediaType()))
+            .post(buildBody(includeHistory, correctionNote).toString().toRequestBody("application/json".toMediaType()))
             .build()
 
         val httpClient = if (needsSearch) searchClient else client
+        val staleRetryNote = "\n\nIMPORTANT CORRECTION: your last attempt at this answer leaned on old " +
+            "training data instead of an actual live search - it didn't mention anything from the last " +
+            "year. Search again right now and answer only with what you actually find dated recently. If " +
+            "you genuinely can't find anything current, say that plainly instead of falling back to what " +
+            "you already \"know\"."
 
         // Attempt 1: the real request, full history + context.
-        executeChat(httpClient, buildRequest(includeHistory = true))?.let { return it }
+        val firstAttempt = executeChat(httpClient, buildRequest(includeHistory = true))
+        if (firstAttempt != null && !(needsSearch && looksStale(firstAttempt))) return firstAttempt
+
+        // Attempt 1b: only fires when attempt 1 actually came back but
+        // looked stale (see looksStale) - a genuine network/API failure
+        // (firstAttempt == null) skips straight to attempt 2 instead, since
+        // the corrective note wouldn't apply to that failure mode.
+        if (needsSearch && firstAttempt != null) {
+            Log.w("Brosco", "Search answer looked stale (old year, nothing recent) - retrying once")
+            executeChat(httpClient, buildRequest(includeHistory = true, correctionNote = staleRetryNote))
+                ?.let { retryAnswer -> if (!looksStale(retryAnswer)) return retryAnswer }
+        }
 
         // Attempt 2: same model, history dropped. Covers the "big message"
         // failure mode - a long conversation history plus a long query can
