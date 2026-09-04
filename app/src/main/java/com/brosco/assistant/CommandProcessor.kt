@@ -119,6 +119,94 @@ object CommandProcessor {
 
     /**
      * Entry point for "Share via -> Brosco" (or the in-app attach button)
+     * on a text/code file when Shrey wants it fixed RIGHT NOW rather than
+     * "overnight" - see queueFileFix below for that slower path, still used
+     * when he explicitly says "overnight". Runs the fix immediately on a
+     * coroutine, speaks progress updates ("shows working") while the model
+     * is thinking, then on completion speaks the summary, saves a real
+     * downloadable file to Downloads, AND posts a notification - so
+     * whichever of those three Shrey notices first, he's covered, exactly
+     * like he asked ("tell me by notifications and also when I am in chat
+     * ... gave me downloadable fixed file").
+     */
+    fun fixFileNow(
+        context: Context,
+        fileName: String,
+        content: String,
+        scope: CoroutineScope,
+        rawSpeak: (String) -> Unit
+    ) {
+        val speak: (String) -> Unit = { response ->
+            MemoryStore.record(context, "[shared a file to fix] $fileName", response)
+            rawSpeak(response)
+        }
+        if (content.isBlank()) {
+            speak("I couldn't read any text out of that file, so there's nothing for me to fix.")
+            return
+        }
+
+        FileFixStore.queue(context, fileName, content)
+        speak("On it - reading through $fileName now. I'll show my work and let you know the moment it's fixed.")
+
+        scope.safeLaunch {
+            // "Show working": the model call itself is one request/response
+            // (Groq doesn't stream partial tokens back to us here), so this
+            // fakes visible progress with a couple of staged updates while
+            // it's actually thinking, instead of going silent for however
+            // long the fix takes on a bigger file. Cancelled the moment the
+            // real result comes back.
+            val stillWorking = java.util.concurrent.atomic.AtomicBoolean(true)
+            val progressJob = launch {
+                delay(2500)
+                if (stillWorking.get()) speak("Still going through $fileName - checking it line by line for real problems.")
+                delay(6000)
+                if (stillWorking.get()) speak("This one's bigger - still working through the logic, hang tight.")
+            }
+
+            val raw = try {
+                withContext(Dispatchers.IO) { GroqApiClient.fixFile(fileName, content) }
+            } catch (e: Exception) {
+                stillWorking.set(false)
+                progressJob.cancel()
+                Log.w("Brosco", "Immediate file fix failed: ${e.message}", e)
+                FileFixStore.markFailed(context)
+                speak("I ran into a problem fixing $fileName - mind sharing it again so I can retry?")
+                return@safeLaunch
+            }
+            stillWorking.set(false)
+            progressJob.cancel()
+
+            val marker = "---FIXED FILE---"
+            val markerIndex = raw.indexOf(marker)
+            val summary: String
+            val fixedContent: String
+            if (markerIndex >= 0) {
+                summary = raw.substring(0, markerIndex).trim()
+                fixedContent = raw.substring(markerIndex + marker.length).trim()
+            } else {
+                // Model didn't follow the format exactly - fall back to
+                // treating the whole reply as the summary and keep the
+                // original file untouched rather than risking corrupting it
+                // with a guess at where the code starts.
+                summary = raw.trim()
+                fixedContent = content
+            }
+
+            FileFixStore.markDone(context, summary, fixedContent)
+            val savedUri = withContext(Dispatchers.IO) { FileFixNotifier.saveToDownloads(context, fileName, fixedContent) }
+            withContext(Dispatchers.IO) { FileFixNotifier.notifyFixReady(context, fileName, savedUri) }
+
+            val whereText = if (savedUri != null) {
+                "It's saved to your Downloads as a ready-to-download file."
+            } else {
+                "I fixed it, but couldn't save a copy to Downloads on this device - ask me for it and I'll read the fixed version back to you."
+            }
+            speak("Done with $fileName. $summary $whereText")
+        }
+    }
+
+    /**
+     * Entry point for "Share via -> Brosco" (or the in-app attach button)
      * on a text/code file with intent to have it fixed overnight. Just
      * queues the job and schedules the background worker - the actual fix
      * happens later via FileFixWorker, possibly after this process is
@@ -258,6 +346,14 @@ object CommandProcessor {
             }
             detectedIntent.type == IntentType.SELECT_SMART_REPLY -> {
                 runSelectSmartReply(detectedIntent.target, speak)
+            }
+
+            // Section 6b: "any messages?" / "any messages on instagram"
+            detectedIntent.type == IntentType.CHECK_MESSAGES && detectedIntent.target == "instagram" -> {
+                runCheckMessages(context, scope, speak, app = "instagram")
+            }
+            detectedIntent.type == IntentType.CHECK_MESSAGES -> {
+                runCheckMessages(context, scope, speak, app = "whatsapp")
             }
 
             // Section 7: screen-aware Q&A
@@ -648,6 +744,77 @@ object CommandProcessor {
         SmartReplyStore.clear()
     }
 
+    // ------------------------------------------------------------------
+    // Section 6b: "any messages?" / "any messages on instagram" - opens
+    // the app if it isn't already the foreground one, scans its chat list
+    // for unread previews (see WhatsAppAccessibilityService.findUnreadChats),
+    // and reads them back. Unlike runWhatsAppSmartReply this never requires
+    // a chat to already be open, and it doesn't generate reply suggestions
+    // - it's purely "did I get anything, and what does it say".
+    // ------------------------------------------------------------------
+    private fun runCheckMessages(
+        context: Context,
+        scope: CoroutineScope,
+        speak: (String) -> Unit,
+        app: String
+    ) {
+        val allowedPackages = if (app == "instagram") {
+            arrayOf("com.instagram.android")
+        } else {
+            arrayOf("com.whatsapp", "com.whatsapp.w4b")
+        }
+        val appLabel = if (app == "instagram") "Instagram" else "WhatsApp"
+
+        scope.safeLaunch {
+            val currentScreen = withContext(Dispatchers.IO) { WhatsAppAccessibilityService.captureScreenText(60) }
+            val alreadyOnTarget = currentScreen.contains(appLabel, ignoreCase = true)
+
+            if (!alreadyOnTarget) {
+                openApp(context, app, speak)
+                val openSteps = mutableListOf<AutomationStep>(
+                    AutomationStep.WaitForPackage(allowedPackages.first()),
+                    AutomationStep.Wait(800)
+                )
+                if (app == "instagram") {
+                    // Lands on the home feed by default - hop over to the
+                    // DM inbox before scanning for unread chats. Different
+                    // Instagram versions/labels have called this "Direct"
+                    // or "Messages" over the years, so try both; whichever
+                    // doesn't exist just times out quickly (optional).
+                    openSteps += AutomationStep.ClickText("Direct", optional = true)
+                    openSteps += AutomationStep.ClickText("Messages", optional = true)
+                    openSteps += AutomationStep.Wait(600)
+                }
+                WhatsAppAccessibilityService.runTask(steps = openSteps, onUpdate = {})
+                awaitAutomationIdle()
+            }
+
+            val unread = withContext(Dispatchers.IO) { WhatsAppAccessibilityService.findUnreadChats(*allowedPackages) }
+            if (unread.isNotEmpty()) {
+                val summary = unread.joinToString(". ") { entry ->
+                    if (entry.preview.isNotBlank()) "${entry.name} says: ${entry.preview}" else "a new message from ${entry.name}"
+                }
+                speak("You've got new $appLabel messages - $summary")
+                return@safeLaunch
+            }
+
+            // The chat-list heuristic above found nothing - either there's
+            // genuinely nothing new, or this app version doesn't expose
+            // unread state the way we're looking for it. Fall back to
+            // reading whatever's actually open on screen right now before
+            // giving up, same as the smart-reply path already did.
+            val latest = withContext(Dispatchers.IO) {
+                WhatsAppAccessibilityService.captureLatestMessageInOpenChat(*allowedPackages)
+            }
+            if (latest != null && !latest.isOutgoing) {
+                speak("Nothing new on the chat list, but the open chat has an unread message: \"${latest.text}\"")
+                return@safeLaunch
+            }
+
+            speak("No new $appLabel messages right now.")
+        }
+    }
+
     private fun ordinalWord(n: Int): String = when (n) {
         1 -> "first"
         2 -> "second"
@@ -810,15 +977,29 @@ object CommandProcessor {
             // back-press from a cart/checkout screen in food-delivery apps
             // often triggers an "are you sure you want to leave?" dialog
             // instead of just navigating - which has no "Search" on it, so
-            // the whole next-item flow stalled with nothing to tap. Zomato's
-            // cart has its own "Add more items" link back to the menu for
-            // exactly this, so use that instead.
-            steps += AutomationStep.ClickText("Add more items", optional = true)
-            steps += AutomationStep.Wait(700)
+            // the whole next-item flow stalled with nothing to tap. Try
+            // every plausible "back to menu" wording Zomato might be
+            // showing, and if none of them land, ReturnToMenu falls back to
+            // pressing Back a few times on its own - see AutomationStep.
+            steps += AutomationStep.ReturnToMenu(
+                returnTexts = listOf("Add more items", "Add More Items", "Order more", "View menu", "Back to menu")
+            )
+            steps += AutomationStep.Wait(500)
         } else {
             openApp(context, "zomato", speak)
             steps += AutomationStep.WaitForPackage("com.application.zomato")
-            steps += AutomationStep.Wait(800)
+            // Same cold-open fix as Domino's below: give the app real time
+            // to settle past its splash/loading, then clear whatever
+            // location/permission/promo popup Zomato tends to show before
+            // Search is reachable on a fresh open.
+            steps += AutomationStep.Wait(1500)
+            steps += AutomationStep.ClickText("Allow", optional = true)
+            steps += AutomationStep.ClickText("While using the app", optional = true)
+            steps += AutomationStep.ClickText("Use current location", optional = true)
+            steps += AutomationStep.ClickText("Skip", optional = true)
+            steps += AutomationStep.ClickText("Not now", optional = true)
+            steps += AutomationStep.ClickText("Continue", optional = true)
+            steps += AutomationStep.Wait(400)
         }
         steps += listOf(
             AutomationStep.ClickText("Search"),
@@ -844,9 +1025,23 @@ object CommandProcessor {
                     "Frequently orders \"$t\" on Zomato."
                 }
             },
-            onFail = { speak("I couldn't finish adding $query on Zomato - the app may have changed screens or nothing matched that name. Take a look and try again.") }
+            onFail = { speak(orderFailureMessage(query, "Zomato")) }
         )
         speak("Searching for $query on Zomato.")
+    }
+
+    // ------------------------------------------------------------------
+    // "It must see my screen": when an order flow fails, say what's
+    // actually on screen right now (via the accessibility tree, the same
+    // source captureScreenText/snapshotScreen already read from) instead of
+    // a generic "something went wrong" - so a failed second item in a
+    // chained order tells Shrey exactly what Brosco is looking at instead
+    // of leaving him guessing whether it's stuck, on the wrong screen, or
+    // just slow.
+    // ------------------------------------------------------------------
+    private fun orderFailureMessage(query: String, appLabel: String): String {
+        val screen = WhatsAppAccessibilityService.captureScreenText(200).ifBlank { "nothing readable" }
+        return "I couldn't finish adding $query on $appLabel - right now I'm seeing: $screen. Take a look and try again."
     }
 
     // ------------------------------------------------------------------
@@ -863,13 +1058,42 @@ object CommandProcessor {
             // has its own "Add more items" link (confirmed from the actual
             // cart screen - see screenshot) - use that instead of a raw
             // back-press, which risks landing on an exit-confirmation dialog
-            // with no "Search" on it for the next item to find.
-            steps += AutomationStep.ClickText("Add more items", optional = true)
-            steps += AutomationStep.Wait(700)
+            // with no "Search" on it for the next item to find. This used
+            // to be a single ClickText for that one exact label - if the
+            // cart's "Cart" button from the FIRST item's flow hadn't
+            // actually landed (also just an optional tap), this had nothing
+            // else to try and the second item's Search step found nothing
+            // at all. ReturnToMenu tries several likely labels and, failing
+            // those, presses Back on its own to physically get off whatever
+            // screen we're stuck on.
+            steps += AutomationStep.ReturnToMenu(
+                returnTexts = listOf("Add more items", "Add More Items", "Order more", "Back to menu", "Menu")
+            )
+            steps += AutomationStep.Wait(500)
         } else {
             openApp(context, "dominos", speak)
             steps += AutomationStep.WaitForPackage("com.Dominos")
-            steps += AutomationStep.Wait(800)
+            // This is the piece that was actually broken: on a cold app
+            // open (the FIRST item in a chain, or any standalone order),
+            // Domino's routinely shows something on top of the menu before
+            // Search is even reachable - a location/address permission
+            // prompt, a "use current location" dialog, a promo popup, an
+            // intro carousel. The old fixed 800ms wait plus a single blind
+            // ClickText("Search") often fired before any of that had
+          // rendered or been dismissed, so it never found Search at all -
+            // exactly the "can't even search the first item" symptom. The
+            // "Add more items"/ReturnToMenu path for the SECOND item in a
+            // chain never had this problem because by then the app is
+            // already fully warmed up, which is why that part already
+            // worked and didn't need touching.
+            steps += AutomationStep.Wait(1500)
+            steps += AutomationStep.ClickText("Allow", optional = true)
+            steps += AutomationStep.ClickText("While using the app", optional = true)
+            steps += AutomationStep.ClickText("Use current location", optional = true)
+            steps += AutomationStep.ClickText("Skip", optional = true)
+            steps += AutomationStep.ClickText("Not now", optional = true)
+            steps += AutomationStep.ClickText("Continue", optional = true)
+            steps += AutomationStep.Wait(400)
         }
         steps += listOf(
             AutomationStep.ClickText("Search"),
@@ -896,7 +1120,7 @@ object CommandProcessor {
                     "Frequently orders \"$t\" on Domino's."
                 }
             },
-            onFail = { speak("I couldn't finish adding $query on Domino's - the app may have changed screens or nothing matched that name. Take a look and try again.") }
+            onFail = { speak(orderFailureMessage(query, "Domino's")) }
         )
         speak("Looking for $query on Domino's.")
     }
