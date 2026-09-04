@@ -3,6 +3,7 @@ package com.brosco.assistant
 import android.Manifest
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -211,7 +212,97 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            tts.language = Locale.US
+            selectBestVoice()
+        }
+    }
+
+    /**
+     * Shrey asked for "a man, English accent, conversational" for Brosco's
+     * voice. Android's TextToSpeech API has no actual gender field on
+     * Voice - that's an engine-level detail Google's on-device TTS engine
+     * doesn't expose consistently across devices/versions - so this is
+     * necessarily a best-effort pick, in order:
+     *   1. Narrow to locale en-GB for the British-English accent.
+     *   2. Among those, prefer voices whose internal name matches a short
+     *      list of identifiers that are commonly male on Google's TTS
+     *      engine on stock/Pixel-style installs. NOT a documented
+     *      guarantee - Google can and does change these per device/engine
+     *      version, which is exactly why this falls back gracefully
+     *      instead of crashing or silently doing nothing if none match.
+     *   3. Within whatever's left, pick the highest Voice.quality - the
+     *      network/WaveNet-style voices sound far more natural and
+     *      "conversational" than the default offline robotic one, which
+     *      matters as much for the ask as the accent does.
+     * If the automatic pick doesn't sound right on your specific phone,
+     * the reliable manual override is Settings -> System -> Languages &
+     * input -> Text-to-speech -> [engine] -> install/pick an English (UK)
+     * male voice there directly - Brosco picks up whatever's set as the
+     * highest-quality installed en-GB voice automatically, no code change
+     * needed.
+     */
+    private fun selectBestVoice() {
+        val voices = try {
+            tts.voices
+        } catch (e: Exception) {
+            Log.w("Brosco", "Couldn't read TTS voice list: ${e.message}")
+            null
+        }
+        if (voices.isNullOrEmpty()) {
+            tts.language = Locale.UK
+            return
+        }
+
+        val britishVoices = voices.filter {
+            it.locale.language.equals("en", ignoreCase = true) &&
+                it.locale.country.equals("GB", ignoreCase = true) &&
+                !it.isNetworkConnectionRequired.let { needsNetwork -> needsNetwork && !hasNetworkConnection() }
+        }
+
+        if (britishVoices.isEmpty()) {
+            // No English (UK) voice data installed on this device at all -
+            // most phones ship only en-US by default and need the UK pack
+            // downloaded separately. Fall back to whatever English is
+            // available rather than silently keeping a random previous
+            // voice or crashing.
+            Log.i("Brosco", "No en-GB voice installed - falling back to default English. " +
+                "Install an English (UK) voice under Settings > Text-to-speech for the accent to apply.")
+            tts.language = Locale.UK
+            tts.setPitch(0.92f)
+            tts.setSpeechRate(1.02f)
+            return
+        }
+
+        val maleHints = listOf("gpg", "rjs", "gbd", "male", "d-network", "d-local")
+        val preferredByName = britishVoices.filter { voice ->
+            maleHints.any { hint -> voice.name.contains(hint, ignoreCase = true) }
+        }
+        val candidates = preferredByName.ifEmpty { britishVoices }
+        val best = candidates.maxByOrNull { it.quality }
+
+        if (best != null) {
+            tts.voice = best
+            Log.i("Brosco", "Selected TTS voice: ${best.name} (quality=${best.quality}, " +
+                "networkRequired=${best.isNetworkConnectionRequired})")
+        } else {
+            tts.language = Locale.UK
+        }
+
+        // A touch lower pitch reads as more natural/masculine for a
+        // conversational assistant tone; rate stays close to 1x (slightly
+        // above, not below) so it sounds like it's actually talking to you
+        // rather than either rushing through lines or sounding robotic/slow.
+        tts.setPitch(0.92f)
+        tts.setSpeechRate(1.02f)
+    }
+
+    private fun hasNetworkConnection(): Boolean {
+        return try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val network = cm.activeNetwork ?: return false
+            val capabilities = cm.getNetworkCapabilities(network) ?: return false
+            capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        } catch (e: Exception) {
+            false
         }
     }
 
@@ -289,13 +380,35 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 // a text/code file to fix. Reading it and hitting the API
                 // key-off require IO, so this hops onto a background
                 // dispatcher rather than blocking the UI thread here.
+                //
+                // Default is now the IMMEDIATE fix ("fix this file") -
+                // this used to always defer to the once-a-night WorkManager
+                // path regardless of what was actually asked, which is why
+                // saying "fix this file" felt like nothing happened for a
+                // full minute. Only an explicit "overnight" in the shared
+                // text still takes the old slower, WorkManager-backed path.
                 val fileName = queryDisplayName(uri) ?: "shared_file.txt"
-                addUserMessage("[shared $fileName] fix this overnight")
+                val wantsOvernight = question.contains("overnight", ignoreCase = true)
+                addUserMessage(
+                    if (question.isNotBlank()) "[shared $fileName] $question"
+                    else "[shared $fileName] fix this file"
+                )
                 CoroutineScope(Dispatchers.Main).launch {
                     val content = withContext(Dispatchers.IO) { readTextFromUri(uri) }
                     safely {
-                        CommandProcessor.queueFileFix(this@MainActivity, fileName, content) { response ->
-                            runOnUiThread { safely { speak(response) } }
+                        if (wantsOvernight) {
+                            CommandProcessor.queueFileFix(this@MainActivity, fileName, content) { response ->
+                                runOnUiThread { safely { speak(response) } }
+                            }
+                        } else {
+                            CommandProcessor.fixFileNow(
+                                context = this@MainActivity,
+                                fileName = fileName,
+                                content = content,
+                                scope = CoroutineScope(Dispatchers.Main)
+                            ) { response ->
+                                runOnUiThread { safely { speak(response) } }
+                            }
                         }
                     }
                 }
