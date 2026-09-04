@@ -86,6 +86,30 @@ sealed class AutomationStep {
     /** Swipe across the screen in a direction. */
     data class Swipe(val direction: SwipeDirection) : AutomationStep()
 
+    /**
+     * Best-effort "get back to a screen that has a Search entry point"
+     * step, used between items in a chained order ("order X on dominos
+     * then order Y"). A single hardcoded ClickText("Add more items") used
+     * to be the only way back to the menu - if that exact label doesn't
+     * exist on the current screen (wrong screen, renamed button, app
+     * update), the whole rest of the chain silently had nothing to search
+     * with the SEARCH step, and the second item failed outright even
+     * though the first one worked fine.
+     *
+     * This tries every label in [returnTexts] (any UI wording for "back to
+     * menu"/"add more items"), and if none of them land after a couple of
+     * tries, falls back to pressing the system Back button up to
+     * [maxBackPresses] times to physically navigate off the product/cart
+     * screen. It never counts as a hard failure on its own (see
+     * WhatsAppAccessibilityService.tick()) - the explicit ClickText/
+     * TypeText steps right after it are what actually verify we made it
+     * back to somewhere useful, retrying on their own regular timeout.
+     */
+    data class ReturnToMenu(
+        val returnTexts: List<String>,
+        val maxBackPresses: Int = 3
+    ) : AutomationStep()
+
     object ScrollForward : AutomationStep()
     object ScrollBackward : AutomationStep()
     object GoBack : AutomationStep()
@@ -118,3 +142,11 @@ data class ScreenElement(
  * this, so it's a heuristic, not a guarantee.
  */
 data class WhatsAppMessageSnapshot(val text: String, val isOutgoing: Boolean)
+
+/**
+ * One unread conversation found on a chat-list screen (WhatsApp,
+ * Instagram DMs, etc.), read straight off that row's own accessibility
+ * description rather than by opening the chat. See
+ * WhatsAppAccessibilityService.findUnreadChats().
+ */
+data class UnreadChatPreview(val name: String, val preview: String)
