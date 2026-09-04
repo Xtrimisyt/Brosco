@@ -51,6 +51,12 @@ enum class IntentType {
     WHATSAPP_SMART_REPLY,
     SELECT_SMART_REPLY,
 
+    // Section 6b: "any messages?" / "any messages on instagram" - just
+    // checks for and reads back unread messages, no reply generation and
+    // no requirement that a chat already be open (see CommandProcessor's
+    // runCheckMessages). target is "whatsapp" or "instagram".
+    CHECK_MESSAGES,
+
     // Section 7: screen-aware Q&A - "what does this error say", "summarize
     // this article" - answered from a live read of the current screen.
     SCREEN_QA,
@@ -104,14 +110,34 @@ object IntentDetector {
         else -> null
     }
 
-    // Phrases that ask Brosco to read the latest WhatsApp message and offer
-    // reply suggestions, rather than select one that's already been offered.
+    // Phrases that ask Brosco to actually generate reply suggestions - these
+    // still require a chat to already be open, since that's where the
+    // suggested reply would actually get sent.
     private val smartReplyTriggers = listOf(
-        "read my whatsapp", "read my messages", "read my message", "check whatsapp",
-        "check my whatsapp", "any new messages", "new whatsapp message", "smart reply",
-        "smart replies", "suggest a reply", "suggest replies", "what should i reply",
-        "how should i reply", "help me reply", "read this message", "read the message",
-        "what did they say", "what did they text"
+        "smart reply", "smart replies", "suggest a reply", "suggest replies",
+        "what should i reply", "how should i reply", "help me reply"
+    )
+
+    // Phrases that just ask "did I get anything?" on WhatsApp - these open
+    // WhatsApp if it isn't already, scan the chat list for unread previews,
+    // and read them back. No reply suggestions, no requirement that a chat
+    // already be open (see runCheckMessages in CommandProcessor).
+    private val whatsappCheckTriggers = listOf(
+        "any message", "any messages", "read my whatsapp", "read my messages",
+        "read my message", "check whatsapp", "check my whatsapp", "any new messages",
+        "new whatsapp message", "new whatsapp messages", "read this message",
+        "read the message", "what did they say", "what did they text",
+        "do i have any messages", "got any messages", "any texts"
+    )
+
+    // Same idea as whatsappCheckTriggers but for Instagram DMs - checked
+    // first (see detect()) since "any messages on instagram" would
+    // otherwise also match the bare "any messages" whatsapp trigger above.
+    private val instagramCheckTriggers = listOf(
+        "any messages on instagram", "any message on instagram",
+        "check my instagram messages", "check instagram messages",
+        "instagram messages", "any instagram messages", "any dms on instagram",
+        "any dms", "new instagram message", "new instagram messages"
     )
 
     // Phrases that ask Brosco to read/explain/summarize whatever's on screen
@@ -195,6 +221,15 @@ object IntentDetector {
         smartReplySelectRegex.find(input)?.let { match ->
             val ordinal = parseOrdinalWord(match.groupValues[1])
             if (ordinal != null) return DetectedIntent(IntentType.SELECT_SMART_REPLY, ordinal.toString())
+        }
+        // Instagram check goes first: "any messages on instagram" would
+        // otherwise also satisfy the looser bare "any messages" trigger
+        // below and get misrouted to WhatsApp.
+        if (instagramCheckTriggers.any { input.contains(it) }) {
+            return DetectedIntent(IntentType.CHECK_MESSAGES, "instagram")
+        }
+        if (whatsappCheckTriggers.any { input.contains(it) }) {
+            return DetectedIntent(IntentType.CHECK_MESSAGES, "whatsapp")
         }
         if (smartReplyTriggers.any { input.contains(it) }) {
             return DetectedIntent(IntentType.WHATSAPP_SMART_REPLY)
