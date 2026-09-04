@@ -52,6 +52,11 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         private var currentStepStartedAt = 0L
         private var currentStepAttempts = 0
 
+        // How many times ReturnToMenu has pressed Back for the CURRENT step
+        // instance. Reset alongside currentStepAttempts (see tick()) so a
+        // fresh ReturnToMenu step in the next chained order starts clean.
+        private var currentStepBackPresses = 0
+
         // Was 150ms. ClickText/ClickFirstResult/TypeText all already retry
         // every tick until they land or their own timeout expires - so this
         // interval is the main thing standing between "found it" and "tapped
@@ -105,6 +110,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             onTaskFail = onFail
             hadStepFailure = false
             currentStepAttempts = 0
+            currentStepBackPresses = 0
             currentStepStartedAt = System.currentTimeMillis()
             instance?.acquireTaskWakeLock()
         }
@@ -160,10 +166,42 @@ class WhatsAppAccessibilityService : AccessibilityService() {
          */
         fun captureLatestWhatsAppMessage(): WhatsAppMessageSnapshot? =
             try {
-                instance?.captureLatestWhatsAppMessageInternal()
+                instance?.captureLatestWhatsAppMessageInternal(setOf("com.whatsapp", "com.whatsapp.w4b"))
             } catch (e: Exception) {
                 Log.e("Brosco", "captureLatestWhatsAppMessage failed: ${e.message}")
                 null
+            }
+
+        /**
+         * Same idea as [captureLatestWhatsAppMessage] but for whatever chat
+         * app is currently open (Instagram DMs, Telegram, etc.) - only used
+         * when the caller doesn't have a package-specific view id to prefer,
+         * so it always runs on the generic "any non-chrome visible text"
+         * fallback path.
+         */
+        fun captureLatestMessageInOpenChat(vararg allowedPackages: String): WhatsAppMessageSnapshot? =
+            try {
+                instance?.captureLatestWhatsAppMessageInternal(allowedPackages.toSet(), requireKnownPackage = true)
+            } catch (e: Exception) {
+                Log.e("Brosco", "captureLatestMessageInOpenChat failed: ${e.message}")
+                null
+            }
+
+        /**
+         * Section 6b: "any messages?" without needing to already be inside a
+         * chat. WhatsApp gives every conversation row in the chat list a
+         * rich TalkBack content-description (contact name, unread state,
+         * and a preview of the last message) so this reads that directly
+         * off the chat-LIST screen instead of tapping into each chat one at
+         * a time - faster, and it doesn't depend on knowing that chat app's
+         * in-chat message bubble layout at all.
+         */
+        fun findUnreadChats(vararg packageNames: String): List<UnreadChatPreview> =
+            try {
+                instance?.findUnreadChatsInternal(packageNames.toSet()) ?: emptyList()
+            } catch (e: Exception) {
+                Log.e("Brosco", "findUnreadChats failed: ${e.message}")
+                emptyList()
             }
     }
 
@@ -268,8 +306,14 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     // gone because playback auto-started) give up fast instead of eating
     // the full step timeout, so a flow doesn't stall for 5s over a tap that
     // was never going to land.
-    private fun effectiveTimeoutMs(step: AutomationStep): Long =
-        if (step is AutomationStep.ClickText && step.optional) 900L else STEP_TIMEOUT_MS
+    private fun effectiveTimeoutMs(step: AutomationStep): Long = when {
+        step is AutomationStep.ClickText && step.optional -> 900L
+        // Generous: this step is what stands between "first order landed"
+        // and "second order can even find Search", covering both the
+        // optional-text attempts AND up to a few Back-press round trips.
+        step is AutomationStep.ReturnToMenu -> 6000L
+        else -> STEP_TIMEOUT_MS
+    }
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -430,6 +474,21 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             is AutomationStep.Swipe -> {
                 success = performSwipe(step.direction)
             }
+            is AutomationStep.ReturnToMenu -> {
+                success = when {
+                    root != null && step.returnTexts.any { clickByTextFuzzy(root, it, exact = false, minYFraction = 0f) } -> true
+                    // Every ~4 ticks (~360ms) that none of the return texts
+                    // matched, throw one Back press at it instead of
+                    // spinning uselessly - gives the screen time to settle
+                    // between presses rather than firing them back-to-back.
+                    currentStepBackPresses < step.maxBackPresses && currentStepAttempts % 4 == 0 -> {
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        currentStepBackPresses++
+                        false
+                    }
+                    else -> false
+                }
+            }
             AutomationStep.ScrollForward -> {
                 success = root?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) == true
             }
@@ -453,6 +512,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         if (success) {
             taskQueue.removeFirstOrNull()
             currentStepAttempts = 0
+            currentStepBackPresses = 0
             currentStepStartedAt = System.currentTimeMillis()
             if (taskQueue.isEmpty()) finishTask()
         } else if (abandon || elapsed > effectiveTimeoutMs(step) || currentStepAttempts > MAX_STALL_TICKS) {
@@ -462,10 +522,16 @@ class WhatsAppAccessibilityService : AccessibilityService() {
             // might not exist on this layout) are EXPECTED to sometimes
             // find nothing - that's not a broken flow, so only REQUIRED
             // steps failing counts as a real failure worth reporting.
-            val isOptionalStep = step is AutomationStep.ClickText && step.optional
+            // ReturnToMenu is the same idea: it's a best-effort "get back
+            // to somewhere searchable" nudge, not something whose own
+            // failure should abort the whole chained order - the very next
+            // step (a real ClickText("Search")) is what actually decides
+            // whether the flow succeeded.
+            val isOptionalStep = (step is AutomationStep.ClickText && step.optional) || step is AutomationStep.ReturnToMenu
             if (!isOptionalStep) hadStepFailure = true
             taskQueue.removeFirstOrNull()
             currentStepAttempts = 0
+            currentStepBackPresses = 0
             currentStepStartedAt = System.currentTimeMillis()
             if (taskQueue.isEmpty()) finishTask()
         }
@@ -622,15 +688,27 @@ class WhatsAppAccessibilityService : AccessibilityService() {
     // lowest bottom edge (furthest down the screen) is the most recent
     // message, since the conversation flows top-to-bottom with newest last.
     // ------------------------------------------------------------------
-    private fun captureLatestWhatsAppMessageInternal(): WhatsAppMessageSnapshot? {
+    private fun captureLatestWhatsAppMessageInternal(
+        allowedPackages: Set<String>,
+        requireKnownPackage: Boolean = false
+    ): WhatsAppMessageSnapshot? {
         val root = rootInActiveWindow ?: return null
         val pkg = root.packageName?.toString()
-        if (pkg != "com.whatsapp" && pkg != "com.whatsapp.w4b") return null
+        // requireKnownPackage=false (the WhatsApp-only caller) keeps the
+        // original strict behavior. requireKnownPackage=true (the generic
+        // "whatever chat app is open" caller) still insists the foreground
+        // app is one of the packages it was asked about - it just doesn't
+        // get to use WhatsApp's own view-id shortcut below since that id
+        // only exists inside WhatsApp itself.
+        if (pkg == null || pkg !in allowedPackages) return null
 
         visitBudget = maxVisits
         val idMatches = mutableListOf<Pair<String, Rect>>()
         val fallback = mutableListOf<Pair<String, Rect>>()
-        collectMessageCandidates(root, depth = 0, idMatches, fallback)
+        // The "com.whatsapp:id/message_text" shortcut only means anything
+        // inside WhatsApp itself - other chat apps (Instagram DMs, etc.)
+        // always go through the generic non-chrome-text fallback pool.
+        collectMessageCandidates(root, depth = 0, idMatches, fallback, useWhatsAppId = pkg == "com.whatsapp" || pkg == "com.whatsapp.w4b")
 
         val pool = idMatches.ifEmpty { fallback }
         val (text, bounds) = pool.maxByOrNull { it.second.bottom } ?: return null
@@ -647,7 +725,8 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         node: AccessibilityNodeInfo?,
         depth: Int,
         idMatches: MutableList<Pair<String, Rect>>,
-        fallback: MutableList<Pair<String, Rect>>
+        fallback: MutableList<Pair<String, Rect>>,
+        useWhatsAppId: Boolean
     ) {
         if (node == null || depth > 40 || !withinBudget()) return
         visitBudget--
@@ -660,7 +739,7 @@ class WhatsAppAccessibilityService : AccessibilityService() {
                 if (!bounds.isEmpty) {
                     val idName = try { node.viewIdResourceName } catch (e: Exception) { null }
                     val entry = text.take(500) to bounds
-                    if (idName == "com.whatsapp:id/message_text") {
+                    if (useWhatsAppId && idName == "com.whatsapp:id/message_text") {
                         idMatches.add(entry)
                     } else if (!looksLikeChatChrome(text)) {
                         fallback.add(entry)
@@ -670,8 +749,66 @@ class WhatsAppAccessibilityService : AccessibilityService() {
         }
 
         for (i in 0 until node.childCount) {
-            collectMessageCandidates(node.getChild(i), depth + 1, idMatches, fallback)
+            collectMessageCandidates(node.getChild(i), depth + 1, idMatches, fallback, useWhatsAppId)
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Section 6b: unread-chat scan for "any messages?" without requiring
+    // a chat to already be open. See findUnreadChats() for why this reads
+    // the chat-LIST row content-descriptions rather than opening each chat.
+    // ------------------------------------------------------------------
+    private fun findUnreadChatsInternal(allowedPackages: Set<String>): List<UnreadChatPreview> {
+        val root = rootInActiveWindow ?: return emptyList()
+        val pkg = root.packageName?.toString()
+        if (pkg == null || pkg !in allowedPackages) return emptyList()
+
+        visitBudget = maxVisits
+        val out = mutableListOf<UnreadChatPreview>()
+        collectUnreadChatRows(root, depth = 0, out)
+        return out.take(10)
+    }
+
+    private fun collectUnreadChatRows(node: AccessibilityNodeInfo?, depth: Int, out: MutableList<UnreadChatPreview>) {
+        if (node == null || depth > 40 || !withinBudget() || out.size >= 10) return
+        visitBudget--
+
+        // WhatsApp (and most well-built chat apps) label each chat-list row
+        // with a single rich content-description for TalkBack, something
+        // like "Contact Name, 2 unread messages, hey are we still on for
+        // tonight, 9:41 PM". Rather than guess at view ids that change
+        // between app versions, this just looks for that "unread" word on
+        // any row-level node and pulls the name + preview out of the same
+        // description.
+        val desc = node.contentDescription?.toString()
+        if (node.isVisibleToUser && !desc.isNullOrBlank() && desc.contains("unread", ignoreCase = true)) {
+            out.add(parseUnreadRowDescription(desc))
+        }
+
+        for (i in 0 until node.childCount) {
+            collectUnreadChatRows(node.getChild(i), depth + 1, out)
+        }
+    }
+
+    /**
+     * Best-effort split of a TalkBack row description into (contact,
+     * preview). The exact wording/ordering varies by app and version, so
+     * this doesn't assume a strict format: first comma-separated segment
+     * that isn't itself the unread/time chrome is taken as the name, and
+     * the first later segment that looks like actual message text (not a
+     * bare number, not a timestamp, not the word "unread") is the preview.
+     */
+    private fun parseUnreadRowDescription(desc: String): UnreadChatPreview {
+        val segments = desc.split(",", ".").map { it.trim() }.filter { it.isNotBlank() }
+        val timePattern = Regex("^\\d{1,2}[:.]\\d{2}\\s*(am|pm)?$", RegexOption.IGNORE_CASE)
+        val name = segments.firstOrNull { !it.contains("unread", ignoreCase = true) } ?: "Someone"
+        val preview = segments.drop(1).firstOrNull { seg ->
+            !seg.contains("unread", ignoreCase = true) &&
+                !seg.equals(name, ignoreCase = true) &&
+                !timePattern.matches(seg) &&
+                seg.any { it.isLetter() }
+        } ?: ""
+        return UnreadChatPreview(name = name.take(60), preview = preview.take(200))
     }
 
     private val timestampPattern = Regex("^\\d{1,2}:\\d{2}( ?[APap][Mm])?$")
