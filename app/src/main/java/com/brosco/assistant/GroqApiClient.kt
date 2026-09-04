@@ -41,20 +41,77 @@ object GroqApiClient {
      * can occasionally still lean on its stale training data for a news/
      * markets answer (the exact "why is it telling me about 2023" failure
      * mode this was built to stop). If a search-grounded answer mentions a
-     * year but never anything from the last 12 months, that's a strong
-     * signal it drifted back to memory instead of using what it searched -
-     * real "current" answers either cite no year at all (most headlines
-     * don't) or cite a recent one. ask() uses this to force exactly one
-     * corrective retry before giving up and returning what it has.
+     * year but never anything recent, that's a strong signal it drifted
+     * back to memory instead of using what it searched - real "current"
+     * answers either cite no date at all (most headlines don't) or cite a
+     * recent one. ask() uses this to force exactly one corrective retry
+     * before giving up and returning what it has.
+     *
+     * Everything "current"/"recent" below is computed from
+     * Calendar.getInstance() AT CALL TIME, not any date written into this
+     * file - so this keeps working correctly on its own with no code
+     * change needed as real time moves forward, whether that's next month,
+     * next year, or five years from now.
      */
     private fun looksStale(text: String): Boolean {
-        val currentYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
+        val now = java.util.Calendar.getInstance()
+        val currentYear = now.get(java.util.Calendar.YEAR)
+        val currentMonthIndex = now.get(java.util.Calendar.MONTH) // 0 = January
+
         val years = Regex("\\b(19|20)\\d{2}\\b").findAll(text)
             .mapNotNull { it.value.toIntOrNull() }
             .toList()
-        if (years.isEmpty()) return false // no year mentioned at all - not a signal either way
-        val newestMentioned = years.max()
-        return newestMentioned < currentYear - 1
+        if (years.isEmpty()) {
+            // No year mentioned at all isn't itself a signal of staleness -
+            // BUT a handful of stock phrases are: a model falling back on
+            // its training data almost always says so explicitly ("as of
+            // my last update", "I don't have real-time access", etc.) even
+            // when it never states a year.
+            val staleDisclaimerPhrases = listOf(
+                "as of my last update", "as of my last training", "my last update",
+                "my training data", "i don't have real-time", "i do not have real-time",
+                "i don't have access to real-time", "i can't browse the internet",
+                "i cannot browse the internet", "i don't have live", "as an ai"
+            )
+            val lower = text.lowercase()
+            return staleDisclaimerPhrases.any { lower.contains(it) }
+        }
+
+        val newestMentionedYear = years.max()
+        // A reply that never mentions the current year at all (e.g. still
+        // stuck on last year's headlines) is stale regardless of month
+        // granularity - this alone catches the "still giving me 2025 news
+        // [in 2026]" bug, and it'll catch the equivalent "still giving me
+        // [this] year's news [next] year" bug automatically too, since
+        // currentYear is read fresh every call.
+        if (newestMentionedYear < currentYear) return true
+
+        // Month-level check: within the CURRENT year, "Month YYYY" pairs
+        // (e.g. "March 2025", "Jan 2026") that are more than ~3 months
+        // behind today are a decent signal the model is citing an old
+        // snapshot even though the bare year happens to match - a plain
+        // year regex alone can't tell January from September. This only
+        // narrows things down further when a month is explicitly paired
+        // with the current year; it never flags a reply that just mentions
+        // the year on its own with no month attached, since that's normal
+        // for most current headlines.
+        val monthNames = listOf(
+            "january", "february", "march", "april", "may", "june",
+            "july", "august", "september", "october", "november", "december"
+        )
+        val monthYearPattern = Regex(
+            "\\b(${monthNames.joinToString("|")})\\.?\\s+($currentYear)\\b",
+            RegexOption.IGNORE_CASE
+        )
+        val monthMatches = monthYearPattern.findAll(text).toList()
+        if (monthMatches.isNotEmpty()) {
+            val newestMonthIndex = monthMatches.maxOf { match ->
+                monthNames.indexOf(match.groupValues[1].lowercase())
+            }
+            if (currentMonthIndex - newestMonthIndex > 3) return true
+        }
+
+        return false
     }
 
     private const val API_KEY = BuildConfig.GROQ_API_KEY
@@ -351,7 +408,13 @@ object GroqApiClient {
                 "say you can't browse the internet or don't have real-time access - for this reply, you do. " +
                 "Prioritize what your search turns up over anything you already \"remember\" - if search " +
                 "results conflict with your training data, the search results win, since your training " +
-                "data is old and theirs isn't."
+                "data is old and theirs isn't. For anything phrased as \"latest\", \"current\", \"today\", " +
+                "\"right now\", or general news/geopolitics, actively favor results dated in the current " +
+                "year/month given above over older ones - don't settle for an article from a year (or " +
+                "even a few months) ago just because it comes up; keep searching or reword the query " +
+                "until you find something actually recent relative to today's real date above. If the " +
+                "most recent thing you can find is genuinely old, say so plainly (e.g. \"the most recent " +
+                "update I can find is from [date]\") instead of presenting it as today's news."
         } else ""
 
         // Factored so the request can be rebuilt with history dropped on
@@ -640,9 +703,8 @@ object GroqApiClient {
             put("messages", JSONArray().apply {
                 put(JSONObject().apply {
                     put("role", "system")
-                    put("content", currentDateContext() + "\n\nYou are Brosco, working overnight on a " +
-                        "file Shrey handed you before going to sleep, so he can pick up the result in " +
-                        "the morning - he's not around to answer follow-up questions right now. The " +
+                    put("content", currentDateContext() + "\n\nYou are Brosco, fixing a file Shrey " +
+                        "handed you. The " +
                         "file is named \"$fileName\". Read it carefully and fix real problems: bugs, " +
                         "broken logic, typos, syntax errors, obvious security issues, anything that " +
                         "would actually fail or misbehave. Don't rewrite working code just for style, " +
